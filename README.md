@@ -133,10 +133,10 @@ cxsw sync-cliproxy-9router   # CLIProxyAPI auth dir to 9Router SQLite
 | `CODEX_HOME` | `$HOME/.codex` |
 | `CLIPROXY_AUTH_DIR` | `$HOME/.cli-proxy-api` |
 | `CLIPROXY_BASE_URL` | `http://127.0.0.1:8317/v1` |
-| `CLIPROXY_API_KEY` | `your-api-key-1` |
+| `CLIPROXY_API_KEY` | optional override; default bearer token is `your-api-key-1` |
 | `NINEROUTER_DB` | `$HOME/.9router/db/data.sqlite` |
 | `NINEROUTER_BASE_URL` | `http://127.0.0.1:20128/v1` |
-| `NINEROUTER_API_KEY` | `sk_9router` |
+| `NINEROUTER_API_KEY` | optional override; default bearer token is `sk_9router` |
 | `CLIPROXY_BACKUP_DIR` | `$HOME/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth` |
 | `PYTHON_BIN` | `python3` |
 | `CODEX_APP_PATH` | `/Applications/Codex.app` |
@@ -156,9 +156,16 @@ model_provider = "cliproxy"
 name = "CLIProxyAPI"
 base_url = "http://127.0.0.1:8317/v1"
 wire_api = "responses"
-env_key = "CLIPROXY_API_KEY"
+
+[model_providers.cliproxy.auth]
+command = "/bin/sh"
+args = ["-c", "if [ -n \"${CLIPROXY_API_KEY:-}\" ]; then printf %s \"${CLIPROXY_API_KEY}\"; else printf %s \"$1\"; fi", "cxsw-auth", "your-api-key-1"]
 # === cxsw managed: provider block end ===
 ```
+
+The auth command means `codex` works even when the shell does not export the
+proxy API key. If you do export `CLIPROXY_API_KEY` or `NINEROUTER_API_KEY`,
+that value takes precedence over the local default.
 
 Switching back to `native` removes only those managed regions. Your other Codex
 settings are left unchanged.

@@ -10,7 +10,7 @@ Only marker-fenced regions are touched. Everything else (plugins, projects,
 marketplaces, comments) is preserved.
 """
 from __future__ import annotations
-import argparse, pathlib, re, sys
+import argparse, json, pathlib, re, sys
 
 MARKER_TOP_BEGIN  = "# === cxsw managed: provider key ==="
 MARKER_TOP_END    = "# === cxsw managed: provider key end ==="
@@ -25,6 +25,7 @@ PROVIDERS = {
         env_key="CLIPROXY_API_KEY",
         wire_api="responses",
         default_url="http://127.0.0.1:8317/v1",
+        default_key="your-api-key-1",
     ),
     "9router": dict(
         id="r9router",
@@ -32,6 +33,7 @@ PROVIDERS = {
         env_key="NINEROUTER_API_KEY",
         wire_api="responses",
         default_url="http://127.0.0.1:20128/v1",
+        default_key="sk_9router",
     ),
 }
 
@@ -47,10 +49,10 @@ def strip_managed(text: str) -> str:
         )
     # Remove our managed top-level model_provider line if it leaked out
     out = re.sub(r"(?m)^\s*model_provider\s*=\s*\"(cliproxy|r9router)\"\s*\n", "", out)
-    # Remove our managed [model_providers.cliproxy] / [model_providers.r9router] blocks
-    # if they exist outside the markers.
+    # Remove our managed provider blocks, including nested auth tables, if
+    # they exist outside the markers.
     out = re.sub(
-        r"(?ms)^\[model_providers\.(?:cliproxy|r9router)\][^\[]*",
+        r"(?ms)^\[model_providers\.(?:cliproxy|r9router)(?:\.[^\]]+)?\].*?(?=^\[(?!model_providers\.(?:cliproxy|r9router)(?:\.|\]))|\Z)",
         "",
         out,
     )
@@ -73,14 +75,33 @@ def build_top(provider_id: str) -> str:
         f"{MARKER_TOP_END}\n"
     )
 
-def build_table(p: dict, base_url: str) -> str:
+def toml_string(value: str) -> str:
+    return json.dumps(value)
+
+def toml_array(values: list[str]) -> str:
+    return "[" + ", ".join(toml_string(v) for v in values) + "]"
+
+def build_auth_command(env_key: str, default_key: str) -> list[str]:
+    return [
+        "/bin/sh",
+        "-c",
+        f'if [ -n "${{{env_key}:-}}" ]; then printf %s "${{{env_key}}}"; else printf %s "$1"; fi',
+        "cxsw-auth",
+        default_key,
+    ]
+
+def build_table(p: dict, base_url: str, default_key: str) -> str:
+    auth_command = build_auth_command(p["env_key"], default_key)
     return (
         f"\n{MARKER_TBL_BEGIN}\n"
         f"[model_providers.{p['id']}]\n"
-        f"name = \"{p['name']}\"\n"
-        f"base_url = \"{base_url}\"\n"
-        f"wire_api = \"{p['wire_api']}\"\n"
-        f"env_key = \"{p['env_key']}\"\n"
+        f"name = {toml_string(p['name'])}\n"
+        f"base_url = {toml_string(base_url)}\n"
+        f"wire_api = {toml_string(p['wire_api'])}\n"
+        f"\n"
+        f"[model_providers.{p['id']}.auth]\n"
+        f"command = {toml_string(auth_command[0])}\n"
+        f"args = {toml_array(auth_command[1:])}\n"
         f"{MARKER_TBL_END}\n"
     )
 
@@ -90,6 +111,8 @@ def main() -> int:
     ap.add_argument("config_path")
     ap.add_argument("--cliproxy-url", default=PROVIDERS["cliproxy"]["default_url"])
     ap.add_argument("--r9router-url", default=PROVIDERS["9router"]["default_url"])
+    ap.add_argument("--cliproxy-key", default=PROVIDERS["cliproxy"]["default_key"])
+    ap.add_argument("--r9router-key", default=PROVIDERS["9router"]["default_key"])
     args = ap.parse_args()
 
     p = pathlib.Path(args.config_path)
@@ -101,10 +124,11 @@ def main() -> int:
     if args.mode != "native":
         provider = PROVIDERS[args.mode]
         url = args.cliproxy_url if args.mode == "cliproxy" else args.r9router_url
+        key = args.cliproxy_key if args.mode == "cliproxy" else args.r9router_key
         text = insert_top_level(text, build_top(provider["id"]))
         if not text.endswith("\n"):
             text += "\n"
-        text += build_table(provider, url)
+        text += build_table(provider, url, key)
 
     # Idempotent: if no change, do not write.
     if text != original:

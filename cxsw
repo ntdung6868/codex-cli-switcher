@@ -25,11 +25,13 @@ CODEX_CONFIG="$CODEX_HOME/config.toml"
 
 CLIPROXY_AUTH_DIR="${CLIPROXY_AUTH_DIR:-$HOME/.cli-proxy-api}"
 CLIPROXY_BASE_URL="${CLIPROXY_BASE_URL:-http://127.0.0.1:8317/v1}"
-CLIPROXY_DEFAULT_KEY="${CLIPROXY_API_KEY:-your-api-key-1}"
+CLIPROXY_FALLBACK_KEY="your-api-key-1"
+CLIPROXY_DEFAULT_KEY="${CLIPROXY_API_KEY:-$CLIPROXY_FALLBACK_KEY}"
 
 NINEROUTER_DB="${NINEROUTER_DB:-$HOME/.9router/db/data.sqlite}"
 NINEROUTER_BASE_URL="${NINEROUTER_BASE_URL:-http://127.0.0.1:20128/v1}"
-NINEROUTER_DEFAULT_KEY="${NINEROUTER_API_KEY:-sk_9router}"
+NINEROUTER_FALLBACK_KEY="sk_9router"
+NINEROUTER_DEFAULT_KEY="${NINEROUTER_API_KEY:-$NINEROUTER_FALLBACK_KEY}"
 
 CLIPROXY_BACKUP_DIR="${CLIPROXY_BACKUP_DIR:-$HOME/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth}"
 
@@ -182,7 +184,9 @@ apply_config_for_mode() {
   local mode="$1"
   "$PYTHON_BIN" "$LIB_DIR/codex-config.py" "$mode" "$CODEX_CONFIG" \
     --cliproxy-url "$CLIPROXY_BASE_URL" \
-    --r9router-url "$NINEROUTER_BASE_URL"
+    --r9router-url "$NINEROUTER_BASE_URL" \
+    --cliproxy-key "$CLIPROXY_FALLBACK_KEY" \
+    --r9router-key "$NINEROUTER_FALLBACK_KEY"
 }
 
 # ============================================================================
@@ -403,7 +407,7 @@ switch_to_cliproxy() {
   apply_config_for_mode cliproxy
   set_active_mode cliproxy
   print -- "Switched Codex CLI → CLIProxyAPI ($CLIPROXY_BASE_URL)"
-  print -- "Make sure env var is set:  export CLIPROXY_API_KEY=$CLIPROXY_DEFAULT_KEY"
+  print -- "Auth: uses \$CLIPROXY_API_KEY when set, otherwise falls back to the default local token."
 }
 
 switch_to_9router() {
@@ -412,7 +416,7 @@ switch_to_9router() {
   apply_config_for_mode 9router
   set_active_mode 9router
   print -- "Switched Codex CLI → 9Router ($NINEROUTER_BASE_URL)"
-  print -- "Make sure env var is set:  export NINEROUTER_API_KEY=$NINEROUTER_DEFAULT_KEY"
+  print -- "Auth: uses \$NINEROUTER_API_KEY when set, otherwise falls back to the default local token."
 }
 
 switch_to_native() {
@@ -790,10 +794,10 @@ Environment variables:
   CODEX_HOME               (default: ~/.codex)
   CLIPROXY_AUTH_DIR        (default: ~/.cli-proxy-api)
   CLIPROXY_BASE_URL        (default: http://127.0.0.1:8317/v1)
-  CLIPROXY_API_KEY         (default api key advertised in helper output)
+  CLIPROXY_API_KEY         (optional override; default bearer token: your-api-key-1)
   NINEROUTER_DB            (default: ~/.9router/db/data.sqlite)
   NINEROUTER_BASE_URL      (default: http://127.0.0.1:20128/v1)
-  NINEROUTER_API_KEY       (default api key advertised in helper output)
+  NINEROUTER_API_KEY       (optional override; default bearer token: sk_9router)
   CLIPROXY_BACKUP_DIR      (default: ~/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth)
   PYTHON_BIN               (default: python3)
   CODEX_APP_PATH           (default: /Applications/Codex.app)

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 - 2026-05-14
+
+- Fix proxy mode auth so Codex CLI no longer exits with missing `CLIPROXY_API_KEY` or `NINEROUTER_API_KEY` after npm install.
+- Generate Codex provider `auth.command` entries that use environment overrides when present and fall back to the local default proxy tokens.
+
 ## 1.0.0 - 2026-05-14
 
 - Initial public release.
