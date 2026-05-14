@@ -1,0 +1,43 @@
+{
+  "name": "cxsw",
+  "version": "1.0.0",
+  "description": "A macOS command-line switcher for routing OpenAI Codex CLI between native ChatGPT, CLIProxyAPI, and 9Router backends.",
+  "license": "MIT",
+  "author": "ntdung6868 <ntdungqlqb@gmail.com>",
+  "homepage": "https://github.com/ntdung6868/cxsw#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ntdung6868/cxsw.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ntdung6868/cxsw/issues"
+  },
+  "bin": {
+    "cxsw": "./cxsw"
+  },
+  "files": [
+    "cxsw",
+    "lib/codex-config.py",
+    "lib/codex-doctor.py",
+    "lib/import-9router.py",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "keywords": [
+    "codex",
+    "openai",
+    "codex-cli",
+    "cliproxy",
+    "9router",
+    "cli",
+    "macos"
+  ],
+  "scripts": {
+    "check": "zsh -n cxsw && python3 -m py_compile lib/codex-config.py lib/codex-doctor.py lib/import-9router.py",
+    "pack:dry": "npm pack --dry-run"
+  }
+}

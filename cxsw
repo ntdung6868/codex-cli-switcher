@@ -1,0 +1,880 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+umask 077
+
+# ============================================================================
+# cxsw — Codex Backend Switcher
+# Switch Codex CLI between CLIProxyAPI / 9router / native ChatGPT subscription,
+# and batch-import Codex OAuth files into 9router.
+# Run with no args for the interactive menu.
+# ============================================================================
+
+SCRIPT_DIR="${0:A:h}"
+INSTALL_DIR="$SCRIPT_DIR"
+DEFAULT_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/cxsw"
+STATE_DIR="${CXSW_STATE_DIR:-${CODEX_SWITCHER_DIR:-$DEFAULT_STATE_DIR}}"
+SNAPSHOT_DIR="$STATE_DIR/snapshots"
+ACTIVE_MODE="$STATE_DIR/active.mode"
+LIB_DIR="$INSTALL_DIR/lib"
+LOCK_DIR="$STATE_DIR/.lock"
+LOCK_PID_FILE="$LOCK_DIR/pid"
+
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+CODEX_AUTH="$CODEX_HOME/auth.json"
+CODEX_CONFIG="$CODEX_HOME/config.toml"
+
+CLIPROXY_AUTH_DIR="${CLIPROXY_AUTH_DIR:-$HOME/.cli-proxy-api}"
+CLIPROXY_BASE_URL="${CLIPROXY_BASE_URL:-http://127.0.0.1:8317/v1}"
+CLIPROXY_DEFAULT_KEY="${CLIPROXY_API_KEY:-your-api-key-1}"
+
+NINEROUTER_DB="${NINEROUTER_DB:-$HOME/.9router/db/data.sqlite}"
+NINEROUTER_BASE_URL="${NINEROUTER_BASE_URL:-http://127.0.0.1:20128/v1}"
+NINEROUTER_DEFAULT_KEY="${NINEROUTER_API_KEY:-sk_9router}"
+
+CLIPROXY_BACKUP_DIR="${CLIPROXY_BACKUP_DIR:-$HOME/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth}"
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+CODEX_APP_PATH="${CODEX_APP_PATH:-/Applications/Codex.app}"
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+typeset -i _CURSOR_HIDDEN=0
+_cleanup_on_exit() {
+  if (( _CURSOR_HIDDEN )) && [[ -t 2 ]]; then
+    print -nu 2 -- $'\033[?25h' 2>/dev/null || true
+  fi
+  if [[ -f "$LOCK_PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$LOCK_PID_FILE" 2>/dev/null)" || pid=""
+    [[ "$pid" == "$$" ]] && rm -rf "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+trap _cleanup_on_exit EXIT
+trap '_cleanup_on_exit; exit 130' INT
+trap '_cleanup_on_exit; exit 143' TERM
+
+die() { print -u2 -- "Error: $*"; exit 1; }
+
+# ============================================================================
+# Filesystem
+# ============================================================================
+
+ensure_dirs() {
+  mkdir -p "$STATE_DIR" "$SNAPSHOT_DIR"
+  chmod 700 "$STATE_DIR" "$SNAPSHOT_DIR" 2>/dev/null || true
+}
+
+# ============================================================================
+# Lock
+# ============================================================================
+
+acquire_lock() {
+  local max_wait="${CODEX_LOCK_TIMEOUT:-30}"
+  local waited=0 lock_pid
+  mkdir -p "$STATE_DIR"
+  if [[ -f "$LOCK_PID_FILE" && "$(cat "$LOCK_PID_FILE" 2>/dev/null)" == "$$" ]]; then
+    return 0
+  fi
+  while true; do
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      print -- "$$" > "$LOCK_PID_FILE"
+      return
+    fi
+    lock_pid=""
+    [[ -f "$LOCK_PID_FILE" ]] && lock_pid="$(cat "$LOCK_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$lock_pid" && "$lock_pid" != "$$" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+      rm -rf "$LOCK_DIR"; continue
+    fi
+    (( waited >= max_wait )) && die "could not acquire lock after ${max_wait}s. Remove $LOCK_DIR manually if no cxsw is running."
+    sleep 1; (( waited++ )) || true
+  done
+}
+release_lock() {
+  [[ -f "$LOCK_PID_FILE" && "$(cat "$LOCK_PID_FILE" 2>/dev/null)" == "$$" ]] && rm -rf "$LOCK_DIR"
+}
+
+# ============================================================================
+# State
+# ============================================================================
+
+active_mode() {
+  [[ -f "$ACTIVE_MODE" ]] && cat "$ACTIVE_MODE" || print -- "native"
+}
+
+set_active_mode() {
+  ensure_dirs
+  print -r -- "$1" > "$ACTIVE_MODE"
+  chmod 600 "$ACTIVE_MODE" 2>/dev/null || true
+}
+
+# Snapshot the current native config the first time we run, so we can rollback.
+maybe_snapshot_native() {
+  ensure_dirs
+  if [[ ! -f "$SNAPSHOT_DIR/native-config.toml" && -f "$CODEX_CONFIG" ]]; then
+    # Only snapshot if there's no model_provider yet (= clean native)
+    if ! grep -qE '^[[:space:]]*model_provider[[:space:]]*=' "$CODEX_CONFIG"; then
+      cp -p "$CODEX_CONFIG" "$SNAPSHOT_DIR/native-config.toml"
+      chmod 600 "$SNAPSHOT_DIR/native-config.toml"
+    fi
+  fi
+  if [[ ! -f "$SNAPSHOT_DIR/native-auth.json" && -f "$CODEX_AUTH" ]]; then
+    cp -p "$CODEX_AUTH" "$SNAPSHOT_DIR/native-auth.json"
+    chmod 600 "$SNAPSHOT_DIR/native-auth.json"
+  fi
+}
+
+# ============================================================================
+# Backend probe (simple health check)
+# ============================================================================
+
+probe() {
+  local url="$1" key="$2"
+  local code
+  code=$(curl -sS -o /dev/null -m 4 -w "%{http_code}" \
+    -H "Authorization: Bearer $key" "$url/models" 2>/dev/null || echo 000)
+  print -- "$code"
+}
+
+backend_status_line() {
+  local mode="$1"
+  case "$mode" in
+    cliproxy)
+      local code; code=$(probe "$CLIPROXY_BASE_URL" "$CLIPROXY_DEFAULT_KEY")
+      print -- "CLIProxyAPI ($CLIPROXY_BASE_URL) HTTP $code"
+      ;;
+    9router)
+      local code; code=$(probe "$NINEROUTER_BASE_URL" "$NINEROUTER_DEFAULT_KEY")
+      print -- "9Router ($NINEROUTER_BASE_URL) HTTP $code"
+      ;;
+    native)
+      if [[ -s "$CODEX_AUTH" ]]; then
+        local plan email
+        plan=$("$PYTHON_BIN" - "$CODEX_AUTH" <<'PY'
+import json,base64,sys
+def b(s):
+  pad="="*(-len(s)%4)
+  return base64.urlsafe_b64decode(s+pad)
+try:
+  d=json.load(open(sys.argv[1]))
+  t=(d.get("tokens") or {}).get("id_token","")
+  p=json.loads(b(t.split(".")[1])) if t.count(".")>=2 else {}
+  obj=p.get("https://api.openai.com/auth") or {}
+  print(p.get("email","?"),"|",obj.get("chatgpt_plan_type","?"))
+except Exception as e:
+  print("? | ?")
+PY
+)
+        print -- "Native (ChatGPT subscription) — $plan"
+      else
+        print -- "Native (no ~/.codex/auth.json)"
+      fi
+      ;;
+  esac
+}
+
+# ============================================================================
+# config.toml mutation
+# ============================================================================
+
+apply_config_for_mode() {
+  local mode="$1"
+  "$PYTHON_BIN" "$LIB_DIR/codex-config.py" "$mode" "$CODEX_CONFIG" \
+    --cliproxy-url "$CLIPROXY_BASE_URL" \
+    --r9router-url "$NINEROUTER_BASE_URL"
+}
+
+# ============================================================================
+# Codex.app helpers
+# ============================================================================
+
+codex_app_running() {
+  [[ -d "$CODEX_APP_PATH" ]] || return 1
+  pgrep -f "$CODEX_APP_PATH/Contents/MacOS/Codex" >/dev/null 2>&1
+}
+
+codex_cli_session_running() {
+  # Match interactive `codex` (not `cxsw`, not `codex app-server`)
+  pgrep -fl 'codex( resume| exec| chat|$)' 2>/dev/null \
+    | grep -vE 'cxsw|app-server|Codex\.app' \
+    | grep -q . 2>/dev/null
+}
+
+relaunch_codex_app() {
+  # Quit Codex.app entirely and reopen it. The new launch reads the fresh
+  # config.toml. Window WILL appear because Electron always creates one on
+  # boot — user explicitly consented when they chose "Yes" in the menu.
+  if ! codex_app_running; then
+    print -- "Codex.app not running — launching fresh…"
+    open -a "$CODEX_APP_PATH" 2>/dev/null
+    return
+  fi
+
+  local interactive=0
+  [[ -t 2 ]] && interactive=1
+  _say() { (( interactive )) && print -u2 -rP -- "  %F{8}$1%f" || true; }
+
+  _say "→ quitting Codex.app…"
+  osascript -e 'tell application "Codex" to quit' >/dev/null 2>&1 || true
+  local waited=0
+  while codex_app_running; do
+    (( waited >= 5 )) && break
+    sleep 1; (( waited++ )) || true
+  done
+  if codex_app_running; then
+    _say "→ force-killing leftover processes…"
+    pkill -9 -f "$CODEX_APP_PATH/Contents/MacOS/Codex" 2>/dev/null || true
+    pkill -9 -f "$CODEX_APP_PATH/Contents/Resources/codex" 2>/dev/null || true
+    sleep 1
+  fi
+  _say "→ launching fresh Codex.app…"
+  open -a "$CODEX_APP_PATH" 2>/dev/null
+  print -- "Codex.app relaunched — it will read the new backend on startup."
+}
+
+quit_codex_app() {
+  # Quit Codex.app entirely without relaunching.
+  if ! codex_app_running; then
+    return 0
+  fi
+  local interactive=0
+  [[ -t 2 ]] && interactive=1
+  _say() { (( interactive )) && print -u2 -rP -- "  %F{8}$1%f" || true; }
+
+  _say "→ quitting Codex.app…"
+  osascript -e 'tell application "Codex" to quit' >/dev/null 2>&1 || true
+  local waited=0
+  while codex_app_running; do
+    (( waited >= 5 )) && break
+    sleep 1; (( waited++ )) || true
+  done
+  if codex_app_running; then
+    _say "→ force-killing leftover processes…"
+    pkill -9 -f "$CODEX_APP_PATH/Contents/MacOS/Codex" 2>/dev/null || true
+    pkill -9 -f "$CODEX_APP_PATH/Contents/Resources/codex" 2>/dev/null || true
+    sleep 1
+  fi
+  if codex_app_running; then
+    print -u2 -- "Warning: Codex.app process still detected."
+  else
+    print -- "Codex.app quit. Open it again from the dock when you need it (it will pick up the new backend automatically)."
+  fi
+}
+
+# ----------------------------------------------------------------------------
+# Hot-reload Codex.app WITHOUT touching the window.
+#
+# The Electron main process spawns a child `codex app-server` for every actual
+# inference request. Stdin/stdout of the child are wired through unix pipes to
+# the parent. Empirically, when we SIGTERM the child, the Electron parent
+# detects the closed pipe and auto-respawns a fresh app-server within ~3 s.
+#
+# The fresh app-server re-reads ~/.codex/config.toml on startup, which is
+# exactly the side-effect we want after a backend switch — and the UI window
+# stays in whatever state (visible / hidden / minimised) the user left it.
+# ----------------------------------------------------------------------------
+hot_reload_codex_app() {
+  if ! codex_app_running; then
+    return 0
+  fi
+  local interactive=0
+  [[ -t 2 ]] && interactive=1
+  _say() { (( interactive )) && print -u2 -rP -- "  %F{8}$1%f" || true; }
+
+  local old_pid
+  old_pid="$(pgrep -f "$CODEX_APP_PATH/Contents/Resources/codex app-server" | head -1)"
+  if [[ -z "$old_pid" ]]; then
+    print -u2 -- "Hot reload: no app-server child found, Codex.app may not have fully booted. Falling back to quit."
+    quit_codex_app
+    return
+  fi
+
+  # Remember the currently-frontmost app so we can restore focus after dismissing the crash UI.
+  local prev_frontmost
+  prev_frontmost="$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)"
+  [[ -z "$prev_frontmost" ]] && prev_frontmost="Terminal"
+
+  _say "→ signalling app-server child (PID $old_pid) to exit…"
+  kill -TERM "$old_pid" 2>/dev/null || true
+
+  # Wait for child to die
+  local waited=0
+  while kill -0 "$old_pid" 2>/dev/null; do
+    (( waited >= 3 )) && break
+    sleep 1; (( waited++ )) || true
+  done
+  if kill -0 "$old_pid" 2>/dev/null; then
+    _say "→ child not responding to TERM, force-killing…"
+    kill -KILL "$old_pid" 2>/dev/null || true
+    sleep 1
+  fi
+
+  # Wait for Electron parent to respawn a new child
+  _say "→ waiting for Electron to respawn app-server…"
+  local new_pid=""
+  waited=0
+  while [[ -z "$new_pid" || "$new_pid" == "$old_pid" ]]; do
+    sleep 1
+    (( waited++ )) || true
+    new_pid="$(pgrep -f "$CODEX_APP_PATH/Contents/Resources/codex app-server" | head -1)"
+    (( waited >= 8 )) && break
+  done
+
+  if [[ -z "$new_pid" || "$new_pid" == "$old_pid" ]]; then
+    print -u2 -- "Hot reload failed (no respawn within 8s). Falling back to full quit."
+    quit_codex_app
+    return
+  fi
+
+  # Child respawned. If Codex.app's window was visible, Electron's renderer is
+  # now showing a "Codex crashed (SIGTERM)" overlay with three buttons:
+  #   button 1 = Check for updates
+  #   button 2 = Open Config.toml
+  #   button 3 = Reload  ← this is what we want
+  #
+  # We retry the click up to 6 times because:
+  #   - rendering of the crash page can lag the kill by 0.5–2 s
+  #   - on some setups (plugins missing in marketplace, etc.) the renderer
+  #     re-emits the crash UI from fresh warning logs after the first dismiss
+  _say "→ dismissing crash overlay (retry up to 6×, verify each pass)…"
+
+  osascript >/dev/null 2>&1 <<'APPLESCRIPT'
+tell application "Codex" to activate
+delay 0.50
+APPLESCRIPT
+
+  local attempt=0 remaining=0
+  while (( attempt < 6 )); do
+    remaining="$(osascript -e 'try
+  tell application "System Events" to tell process "Codex"
+    if (count of windows) = 0 then return 0
+    return (count of buttons of window 1)
+  end tell
+on error
+  return -1
+end try' 2>/dev/null)"
+    if [[ "$remaining" == "0" ]]; then
+      break
+    fi
+    osascript >/dev/null 2>&1 <<'APPLESCRIPT'
+tell application "System Events"
+  tell process "Codex"
+    try
+      if (count of windows) > 0 and (count of buttons of window 1) ≥ 3 then
+        click button 3 of window 1
+      end if
+    end try
+  end tell
+end tell
+APPLESCRIPT
+    sleep 1
+    (( attempt++ )) || true
+  done
+
+  # Restore previous frontmost app
+  osascript >/dev/null 2>&1 <<APPLESCRIPT
+try
+  tell application "$prev_frontmost" to activate
+end try
+APPLESCRIPT
+
+  if [[ "$remaining" == "0" ]]; then
+    print -- "Hot reload OK — app-server replaced (PID $old_pid → $new_pid), crash overlay dismissed in $attempt attempt(s)."
+  else
+    print -u2 -- "Hot reload partial: app-server replaced but crash overlay still showing $remaining buttons after 6 retries."
+    print -u2 -- "  → This usually means a plugin in ~/.codex/config.toml references a marketplace it can no longer find."
+    print -u2 -- "  → The renderer keeps re-emitting the error from warning logs."
+    print -u2 -- "  → Fix: open Codex.app, click 'Open Config.toml', remove broken [plugins.\"...\"] entries, save, then click Reload."
+    print -u2 -- "  → Or: 'cxsw quit-app' and reopen Codex.app cleanly."
+  fi
+}
+
+# Back-compat alias.
+restart_codex_app() { hot_reload_codex_app; }
+
+# ============================================================================
+# Mode switches
+# ============================================================================
+
+switch_to_cliproxy() {
+  [[ -f "$CODEX_CONFIG" ]] || die "no Codex config at $CODEX_CONFIG — run codex once first."
+  maybe_snapshot_native
+  apply_config_for_mode cliproxy
+  set_active_mode cliproxy
+  print -- "Switched Codex CLI → CLIProxyAPI ($CLIPROXY_BASE_URL)"
+  print -- "Make sure env var is set:  export CLIPROXY_API_KEY=$CLIPROXY_DEFAULT_KEY"
+}
+
+switch_to_9router() {
+  [[ -f "$CODEX_CONFIG" ]] || die "no Codex config at $CODEX_CONFIG — run codex once first."
+  maybe_snapshot_native
+  apply_config_for_mode 9router
+  set_active_mode 9router
+  print -- "Switched Codex CLI → 9Router ($NINEROUTER_BASE_URL)"
+  print -- "Make sure env var is set:  export NINEROUTER_API_KEY=$NINEROUTER_DEFAULT_KEY"
+}
+
+switch_to_native() {
+  [[ -f "$CODEX_CONFIG" ]] || die "no Codex config at $CODEX_CONFIG — run codex once first."
+  maybe_snapshot_native
+  apply_config_for_mode native
+  # If the native auth.json was removed but we have a snapshot, restore it.
+  if [[ ! -s "$CODEX_AUTH" && -s "$SNAPSHOT_DIR/native-auth.json" ]]; then
+    cp -p "$SNAPSHOT_DIR/native-auth.json" "$CODEX_AUTH"
+    chmod 600 "$CODEX_AUTH"
+    print -- "Restored ~/.codex/auth.json from snapshot."
+  fi
+  set_active_mode native
+  print -- "Switched Codex CLI → native ChatGPT subscription (auth.json)."
+}
+
+# ============================================================================
+# Imports
+# ============================================================================
+
+import_backup_to_cliproxy() {
+  [[ -d "$CLIPROXY_BACKUP_DIR" ]] || die "backup dir not found: $CLIPROXY_BACKUP_DIR"
+  mkdir -p "$CLIPROXY_AUTH_DIR"; chmod 700 "$CLIPROXY_AUTH_DIR"
+  local copied=0 skipped=0
+  setopt local_options null_glob
+  for f in "$CLIPROXY_BACKUP_DIR"/*.json; do
+    local base="$(basename "$f")"
+    if [[ -f "$CLIPROXY_AUTH_DIR/$base" ]]; then
+      skipped=$((skipped+1))
+    else
+      cp -p "$f" "$CLIPROXY_AUTH_DIR/$base"
+      chmod 600 "$CLIPROXY_AUTH_DIR/$base"
+      copied=$((copied+1))
+    fi
+  done
+  print -- "Restored OAuth → CLIProxyAPI: copied=$copied skipped=$skipped (file watcher auto-loads)"
+}
+
+import_cliproxy_to_9router() {
+  [[ -d "$CLIPROXY_AUTH_DIR" ]] || die "auth dir not found: $CLIPROXY_AUTH_DIR"
+  [[ -f "$NINEROUTER_DB" ]] || die "9router DB not found: $NINEROUTER_DB"
+  "$PYTHON_BIN" "$LIB_DIR/import-9router.py" \
+    --src "$CLIPROXY_AUTH_DIR" --db "$NINEROUTER_DB"
+}
+
+import_backup_to_9router() {
+  [[ -d "$CLIPROXY_BACKUP_DIR" ]] || die "backup dir not found: $CLIPROXY_BACKUP_DIR"
+  [[ -f "$NINEROUTER_DB" ]] || die "9router DB not found: $NINEROUTER_DB"
+  "$PYTHON_BIN" "$LIB_DIR/import-9router.py" \
+    --src "$CLIPROXY_BACKUP_DIR" --db "$NINEROUTER_DB"
+}
+
+# ============================================================================
+# Interactive UI
+# ============================================================================
+
+ui_print()       { print -rP -- "$@" >&2; }
+ui_printn()      { print -nrP -- "$@" >&2; }
+ui_clear()       { print -n -- $'\033[2J\033[H' >&2; }
+ui_hide_cursor() { print -n -- $'\033[?25l' >&2; _CURSOR_HIDDEN=1; }
+ui_show_cursor() { print -n -- $'\033[?25h' >&2; _CURSOR_HIDDEN=0; }
+ui_clear_line()  { print -n -- $'\033[K' >&2; }
+ui_cursor_up()   { print -n -- $'\033['"$1"'A' >&2; }
+
+read_key() {
+  local k1 k2 k3
+  if ! IFS= read -rsk 1 k1 < /dev/tty 2>/dev/null; then print -- ESC; return; fi
+  case "$k1" in
+    $'\x1b')
+      k2=""; IFS= read -rsk 1 -t 0.05 k2 < /dev/tty 2>/dev/null || true
+      [[ "${k2:-}" != "[" ]] && { print -- ESC; return; }
+      IFS= read -rsk 1 k3 < /dev/tty 2>/dev/null || { print -- ESC; return; }
+      case "$k3" in
+        A) print -- UP ;; B) print -- DOWN ;;
+        C) print -- RIGHT ;; D) print -- LEFT ;;
+        *) print -- OTHER ;;
+      esac ;;
+    $'\n'|$'\r'|"") print -- ENTER ;;
+    q|Q) print -- QUIT ;;
+    j) print -- DOWN ;;
+    k) print -- UP ;;
+    *) print -- "$k1" ;;
+  esac
+}
+
+menu_select() {
+  local title="$1"; shift
+  local items=("$@"); local n=$#items
+  local selected=1 key i
+  ui_hide_cursor
+  draw() {
+    ui_print "%F{cyan}${title}%f"
+    ui_print ""
+    for i in {1..$n}; do
+      ui_clear_line
+      if (( i == selected )); then
+        ui_print "  %F{green}❯%f %B${items[i]}%b"
+      else
+        ui_print "    %F{8}${items[i]}%f"
+      fi
+    done
+    ui_print ""
+    ui_print "%F{8}[↑↓ navigate · Enter select · Esc/q back]%f"
+  }
+  draw
+  local total_lines=$((n + 4))
+  while true; do
+    key="$(read_key)"
+    case "$key" in
+      UP)   (( selected-- )); (( selected < 1 )) && selected=$n ;;
+      DOWN) (( selected++ )); (( selected > n )) && selected=1 ;;
+      ENTER) ui_show_cursor; print -- "$selected"; return 0 ;;
+      ESC|QUIT) ui_show_cursor; return 1 ;;
+      *) continue ;;
+    esac
+    ui_cursor_up $total_lines; draw
+  done
+}
+
+confirm() {
+  local question="$1" choice
+  if ! choice="$(menu_select "$question" "No" "Yes")"; then return 1; fi
+  [[ "$choice" == "2" ]]
+}
+
+ui_pause() {
+  ui_print ""
+  ui_printn "%F{8}Press any key to continue…%f"
+  read_key >/dev/null
+}
+
+print_header() {
+  local mode active_summary
+  mode="$(active_mode)"
+  active_summary="$(backend_status_line "$mode" 2>/dev/null || print "?")"
+  local codex_ver
+  codex_ver="$(codex --version 2>/dev/null | head -1 || print "n/a")"
+  ui_print "%F{cyan}╭───────────────────────────────────────────────────────────────╮%f"
+  ui_print "%F{cyan}│%f  %Bcxsw%b — Codex Backend Switcher"
+  ui_print "%F{cyan}├───────────────────────────────────────────────────────────────┤%f"
+  ui_print "%F{cyan}│%f  %F{yellow}⚡%f Mode:    %F{green}${mode}%f"
+  ui_print "%F{cyan}│%f  %F{magenta}🔌%f Status:  ${active_summary}"
+  ui_print "%F{cyan}│%f  %F{8}codex:   ${codex_ver}%f"
+  ui_print "%F{cyan}╰───────────────────────────────────────────────────────────────╯%f"
+  ui_print ""
+}
+
+# ============================================================================
+# Menu actions
+# ============================================================================
+
+menu_switch() {
+  ui_clear; print_header
+  local choice
+  if ! choice="$(menu_select "Choose backend for Codex CLI:" \
+      "CLIProxyAPI  (http://127.0.0.1:8317  · pool of OAuth accounts)" \
+      "9Router      (http://127.0.0.1:20128 · combo + RTK)" \
+      "Native ChatGPT subscription  (revert to ~/.codex/auth.json)")"; then
+    return
+  fi
+  acquire_lock
+  local rc=0 err=""
+  case "$choice" in
+    1) err="$( (switch_to_cliproxy) 2>&1 )" || rc=$? ;;
+    2) err="$( (switch_to_9router) 2>&1 )" || rc=$? ;;
+    3) err="$( (switch_to_native) 2>&1 )" || rc=$? ;;
+  esac
+  release_lock
+  ui_print ""
+  if (( rc == 0 )); then
+    ui_print "%F{green}✓%f $err"
+  else
+    ui_print "%F{red}✗ $err%f"
+    ui_pause; return
+  fi
+
+  # Ask user whether they want to relaunch Codex.app.
+  if codex_app_running; then
+    ui_print ""
+    ui_print "%F{yellow}Codex.app is running — it caches config.toml until restart.%f"
+    if confirm "Relaunch Codex.app now? (window will reopen)"; then
+      ui_print ""
+      ui_print "%F{cyan}Relaunching Codex.app…%f"
+      relaunch_codex_app
+      ui_print "%F{green}✓ Done.%f"
+    else
+      ui_print ""
+      ui_print "%F{8}Skipped. Codex.app will keep using the old backend until you restart it.%f"
+    fi
+  fi
+  # Warn (not auto-kill) about CLI sessions
+  if codex_cli_session_running; then
+    ui_print ""
+    ui_print "%F{yellow}A 'codex' interactive session is open — exit it and re-run 'codex' to pick up the new backend.%f"
+  fi
+  ui_pause
+}
+
+menu_restart_app() {
+  ui_clear; print_header
+  if ! codex_app_running; then
+    ui_print "%F{8}Codex.app is not running.%f"
+    if confirm "Launch Codex.app now?"; then
+      open -a "$CODEX_APP_PATH" 2>/dev/null
+      ui_print "%F{green}✓ Launched.%f"
+      ui_pause
+    fi
+    return
+  fi
+  local choice
+  if ! choice="$(menu_select "Codex.app actions:" \
+      "Relaunch (quit + reopen, window will reappear)" \
+      "Quit only (no relaunch — you reopen when ready)" \
+      "Hot reload [advanced] — kill app-server child, may show crash UI" \
+      "Cancel")"; then
+    return
+  fi
+  case "$choice" in
+    1)
+      ui_print ""
+      ui_print "%F{cyan}Relaunching Codex.app…%f"
+      relaunch_codex_app
+      ui_print "%F{green}✓ Done.%f"
+      ;;
+    2)
+      ui_print ""
+      ui_print "%F{cyan}Quitting Codex.app…%f"
+      quit_codex_app
+      ui_print "%F{green}✓ Done. Reopen Codex.app when you need it.%f"
+      ;;
+    3)
+      ui_print ""
+      ui_print "%F{cyan}Hot reload (advanced)…%f"
+      hot_reload_codex_app
+      ui_print "%F{green}✓ Attempted. See output above.%f"
+      ;;
+    4) return ;;
+  esac
+  ui_pause
+}
+
+menu_status() {
+  ui_clear; print_header
+  ui_print "%BActive mode:%b $(active_mode)"
+  ui_print ""
+  ui_print "%F{cyan}Backend health%f"
+  for m in cliproxy 9router native; do
+    ui_print "  • $(backend_status_line "$m")"
+  done
+  ui_print ""
+  ui_print "%F{cyan}Codex config head%f"
+  if [[ -f "$CODEX_CONFIG" ]]; then
+    head -20 "$CODEX_CONFIG" | sed 's/^/  /' | while IFS= read -r line; do ui_print "  %F{8}$line%f"; done
+  fi
+  ui_print ""
+  ui_print "%F{cyan}Account pool sizes%f"
+  local cli_n r9_n
+  cli_n="$(ls -1 "$CLIPROXY_AUTH_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+  r9_n="$(sqlite3 "$NINEROUTER_DB" "SELECT COUNT(*) FROM providerConnections WHERE provider='codex' AND isActive=1;" 2>/dev/null || print 0)"
+  ui_print "  • CLIProxyAPI auth files:   $cli_n"
+  ui_print "  • 9Router codex providers: $r9_n (active)"
+  ui_pause
+}
+
+menu_import() {
+  ui_clear; print_header
+  local choice
+  if ! choice="$(menu_select "Import / Sync:" \
+      "Restore Codex OAuth backup → CLIProxyAPI auth dir" \
+      "Restore Codex OAuth backup → 9Router DB" \
+      "Sync CLIProxyAPI auth dir   → 9Router DB" \
+      "Back")"; then
+    return
+  fi
+  acquire_lock
+  local rc=0 out=""
+  case "$choice" in
+    1) out="$( (import_backup_to_cliproxy) 2>&1 )" || rc=$? ;;
+    2) out="$( (import_backup_to_9router) 2>&1 )" || rc=$? ;;
+    3) out="$( (import_cliproxy_to_9router) 2>&1 )" || rc=$? ;;
+    4) release_lock; return ;;
+  esac
+  release_lock
+  ui_print ""
+  ui_print "$out"
+  ui_pause
+}
+
+menu_run_codex() {
+  ui_show_cursor; ui_clear
+  exec codex "$@"
+}
+
+menu_open_panels() {
+  ui_clear; print_header
+  local choice
+  if ! choice="$(menu_select "Open management panel:" \
+      "CLIProxyAPI  → http://127.0.0.1:8317/management.html" \
+      "9Router      → http://127.0.0.1:20128/dashboard" \
+      "Back")"; then
+    return
+  fi
+  case "$choice" in
+    1) open "http://127.0.0.1:8317/management.html" ;;
+    2) open "http://127.0.0.1:20128/dashboard" ;;
+  esac
+}
+
+menu_main() {
+  if ! [[ -t 0 && -r /dev/tty ]]; then
+    die "interactive menu requires a terminal. Run 'cxsw help' for CLI commands."
+  fi
+  ensure_dirs
+  maybe_snapshot_native
+  while true; do
+    ui_clear; print_header
+    local choice
+    if ! choice="$(menu_select "What do you want to do?" \
+        "Switch backend (CLIProxyAPI / 9Router / Native)" \
+        "Show status (mode + health + pool sizes)" \
+        "Import / Sync OAuth accounts" \
+        "Open management panel in browser" \
+        "Reload / quit Codex.app" \
+        "Run codex now" \
+        "Quit")"; then
+      ui_clear; return 0
+    fi
+    case "$choice" in
+      1) menu_switch ;;
+      2) menu_status ;;
+      3) menu_import ;;
+      4) menu_open_panels ;;
+      5) menu_restart_app ;;
+      6) menu_run_codex ;;
+      7) ui_clear; return 0 ;;
+    esac
+  done
+}
+
+# ============================================================================
+# Usage
+# ============================================================================
+
+usage() {
+  cat <<EOF
+cxsw — Codex Backend Switcher
+
+Usage:
+  cxsw                       Open the interactive menu
+  cxsw use cliproxy                     Switch only (Codex.app left alone)
+  cxsw use 9router                      Switch only (Codex.app left alone)
+  cxsw use native                       Switch only (Codex.app left alone)
+  cxsw use --relaunch <mode>            Switch + full quit + reopen Codex.app
+  cxsw use --quit-app <mode>            Switch + quit Codex.app (no relaunch)
+  cxsw use --hot-reload <mode>          [advanced] Kill app-server child only
+  cxsw relaunch-app                     Quit + reopen Codex.app
+  cxsw quit-app                         Quit Codex.app
+  cxsw hot-reload                       [advanced] Kill app-server child only
+  cxsw doctor                           Diagnose plugin/marketplace mismatches
+  cxsw doctor --fix                     Comment out broken plugin entries in config.toml
+  cxsw doctor --disable "<name@mp>" --fix
+                                        Force-disable a specific plugin (e.g. the ones
+                                        Codex.app falsely reports as missing)
+  cxsw status                Print mode + backend health
+  cxsw current               Print active mode name only
+  cxsw import-backup-cliproxy   Restore backup → ~/.cli-proxy-api/
+  cxsw import-backup-9router    Restore backup → 9Router DB
+  cxsw sync-cliproxy-9router    Sync ~/.cli-proxy-api/ → 9Router DB
+  cxsw init                  Create dirs + snapshot native config (idempotent)
+  cxsw help                  Show this help
+
+Environment variables:
+  CXSW_STATE_DIR           (default: ${XDG_STATE_HOME:-~/.local/state}/cxsw)
+  CODEX_SWITCHER_DIR       Legacy alias for CXSW_STATE_DIR
+  CODEX_HOME               (default: ~/.codex)
+  CLIPROXY_AUTH_DIR        (default: ~/.cli-proxy-api)
+  CLIPROXY_BASE_URL        (default: http://127.0.0.1:8317/v1)
+  CLIPROXY_API_KEY         (default api key advertised in helper output)
+  NINEROUTER_DB            (default: ~/.9router/db/data.sqlite)
+  NINEROUTER_BASE_URL      (default: http://127.0.0.1:20128/v1)
+  NINEROUTER_API_KEY       (default api key advertised in helper output)
+  CLIPROXY_BACKUP_DIR      (default: ~/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth)
+  PYTHON_BIN               (default: python3)
+  CODEX_APP_PATH           (default: /Applications/Codex.app)
+EOF
+}
+
+# ============================================================================
+# Dispatch
+# ============================================================================
+
+cmd="${1:-}"
+case "$cmd" in
+  "")
+    menu_main ;;
+  init)
+    ensure_dirs; maybe_snapshot_native
+    print -- "Initialized state: $STATE_DIR"
+    print -- "Native snapshot: $SNAPSHOT_DIR/native-config.toml (if applicable)" ;;
+  use)
+    shift
+    # Default = leave Codex.app alone (user decides whether to restart).
+    # --relaunch  : full quit + reopen
+    # --quit-app  : full quit, no relaunch
+    # --hot-reload: kill app-server child only (advanced; may show crash UI)
+    reload_mode="none"
+    args=()
+    for a in "$@"; do
+      case "$a" in
+        --no-reload) reload_mode="none" ;;
+        --relaunch|--restart-app) reload_mode="relaunch" ;;
+        --quit-app) reload_mode="quit" ;;
+        --hot-reload) reload_mode="hot" ;;
+        *) args+=("$a") ;;
+      esac
+    done
+    set -- "${args[@]}"
+    [[ $# -ge 1 ]] || die "usage: cxsw use [--no-reload|--relaunch|--quit-app|--hot-reload] <cliproxy|9router|native>"
+    target="$1"
+    acquire_lock
+    case "$target" in
+      cliproxy) switch_to_cliproxy ;;
+      9router)  switch_to_9router ;;
+      native)   switch_to_native ;;
+      *)        die "unknown mode: $target" ;;
+    esac
+    release_lock
+    if codex_app_running; then
+      case "$reload_mode" in
+        relaunch) print -- "Relaunching Codex.app…"; relaunch_codex_app ;;
+        quit)     print -- "Quitting Codex.app…"; quit_codex_app ;;
+        hot)      print -- "Hot-reloading…"; hot_reload_codex_app ;;
+        none)     print -- "Note: Codex.app is running. Run 'cxsw relaunch-app' or close+reopen it for the new backend to take effect." ;;
+      esac
+    fi
+    if codex_cli_session_running; then
+      print -- "Note: a 'codex' interactive session is open — exit and re-run codex to pick up the new backend."
+    fi ;;
+  hot-reload)
+    hot_reload_codex_app ;;
+  relaunch-app|restart-app)
+    relaunch_codex_app ;;
+  quit-app)
+    quit_codex_app ;;
+  doctor)
+    "$PYTHON_BIN" "$LIB_DIR/codex-doctor.py" --config "$CODEX_CONFIG" "$@" ;;
+  status)
+    mode="$(active_mode)"
+    print -- "Mode: $mode"
+    for m in cliproxy 9router native; do
+      print -- "  $m: $(backend_status_line "$m")"
+    done ;;
+  current)
+    active_mode ;;
+  import-backup-cliproxy)
+    acquire_lock; import_backup_to_cliproxy ;;
+  import-backup-9router)
+    acquire_lock; import_backup_to_9router ;;
+  sync-cliproxy-9router)
+    acquire_lock; import_cliproxy_to_9router ;;
+  -h|--help|help)
+    usage ;;
+  *)
+    die "unknown command: $cmd" ;;
+esac

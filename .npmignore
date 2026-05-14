@@ -1,0 +1,13 @@
+# npm uses package.json "files" as the allowlist. These entries are kept as
+# a second guard against accidentally publishing local state from manual packs.
+snapshots/
+active.mode
+.lock/
+dist/
+node_modules/
+__pycache__/
+*.py[cod]
+*.tmp
+*.bak
+*.log
+.DS_Store

@@ -1,0 +1,17 @@
+# Local runtime state and secrets
+snapshots/
+active.mode
+.lock/
+
+# Build and package output
+dist/
+*.tgz
+
+# Local/editor noise
+*.tmp
+*.bak
+*.log
+.DS_Store
+node_modules/
+__pycache__/
+*.py[cod]
