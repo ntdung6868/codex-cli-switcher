@@ -13,7 +13,7 @@
     "url": "https://github.com/ntdung6868/cxsw/issues"
   },
   "bin": {
-    "cxsw": "./cxsw"
+    "cxsw": "cxsw"
   },
   "files": [
     "cxsw",
