@@ -1,18 +1,19 @@
 {
-  "name": "@ntdung6868/cxsw",
+  "name": "@ntdung6868/codex-switcher",
   "version": "1.0.0",
   "description": "A macOS command-line switcher for routing OpenAI Codex CLI between native ChatGPT, CLIProxyAPI, and 9Router backends.",
   "license": "MIT",
   "author": "ntdung6868 <ntdungqlqb@gmail.com>",
-  "homepage": "https://github.com/ntdung6868/cxsw#readme",
+  "homepage": "https://github.com/ntdung6868/codex-switcher#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ntdung6868/cxsw.git"
+    "url": "git+https://github.com/ntdung6868/codex-switcher.git"
   },
   "bugs": {
-    "url": "https://github.com/ntdung6868/cxsw/issues"
+    "url": "https://github.com/ntdung6868/codex-switcher/issues"
   },
   "bin": {
+    "codex-switcher": "cxsw",
     "cxsw": "cxsw"
   },
   "files": [

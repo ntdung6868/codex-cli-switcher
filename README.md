@@ -1,6 +1,6 @@
-# cxsw
+# codex-switcher
 
-`cxsw` is a macOS command-line switcher for routing the OpenAI Codex CLI
+`codex-switcher` is a macOS command-line switcher for routing the OpenAI Codex CLI
 between native ChatGPT, CLIProxyAPI, and 9Router backends.
 
 It edits only its own marker-fenced blocks in `~/.codex/config.toml`, keeps the
@@ -39,7 +39,7 @@ profile.
 ## Installation
 
 ```bash
-npm install -g @ntdung6868/cxsw
+npm install -g @ntdung6868/codex-switcher
 cxsw init
 ```
 
@@ -52,8 +52,8 @@ cxsw
 You can also run directly from a cloned repository:
 
 ```bash
-git clone https://github.com/ntdung6868/cxsw.git
-cd cxsw
+git clone https://github.com/ntdung6868/codex-switcher.git
+cd codex-switcher
 ./cxsw
 ```
 
@@ -184,8 +184,8 @@ npm run check
 npm run pack:dry
 ```
 
-The npm package is published as `@ntdung6868/cxsw`, exposes `cxsw` through the
-`bin` field, and ships only:
+The npm package is published as `@ntdung6868/codex-switcher`, exposes both
+`codex-switcher` and `cxsw` through the `bin` field, and ships only:
 
 - `cxsw`
 - `lib/`
