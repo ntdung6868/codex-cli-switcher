@@ -39,7 +39,7 @@ profile.
 ## Installation
 
 ```bash
-npm install -g cxsw
+npm install -g @ntdung6868/cxsw
 cxsw init
 ```
 
@@ -184,7 +184,8 @@ npm run check
 npm run pack:dry
 ```
 
-The npm package exposes `cxsw` through the `bin` field and ships only:
+The npm package is published as `@ntdung6868/cxsw`, exposes `cxsw` through the
+`bin` field, and ships only:
 
 - `cxsw`
 - `lib/`

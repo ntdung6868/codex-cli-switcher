@@ -1,5 +1,5 @@
 {
-  "name": "cxsw",
+  "name": "@ntdung6868/cxsw",
   "version": "1.0.0",
   "description": "A macOS command-line switcher for routing OpenAI Codex CLI between native ChatGPT, CLIProxyAPI, and 9Router backends.",
   "license": "MIT",
