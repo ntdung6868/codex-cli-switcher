@@ -25,6 +25,7 @@ profile.
 - Relaunch, quit, or hot-reload Codex.app after changing backends.
 - Diagnose plugin/marketplace mismatches that can trigger Codex.app crash overlays.
 - Import and sync Codex OAuth account JSON files into CLIProxyAPI and 9Router.
+- Repair Codex local session indexes so old threads stay visible after switching backends.
 - Package as a single npm-installed `cxsw` command with no runtime npm dependencies.
 
 ## Requirements
@@ -122,6 +123,8 @@ cxsw doctor --fix            # comment out orphaned plugin entries
 cxsw import-backup-cliproxy  # backup OAuth JSON files to CLIProxyAPI dir
 cxsw import-backup-9router   # backup OAuth JSON files to 9Router SQLite
 cxsw sync-cliproxy-9router   # CLIProxyAPI auth dir to 9Router SQLite
+cxsw repair-sessions         # rebuild session index + adopt threads to active backend
+cxsw repair-sessions --dry-run
 ```
 
 ## Configuration
@@ -138,6 +141,7 @@ cxsw sync-cliproxy-9router   # CLIProxyAPI auth dir to 9Router SQLite
 | `NINEROUTER_BASE_URL` | `http://127.0.0.1:20128/v1` |
 | `NINEROUTER_API_KEY` | optional override; default bearer token is `sk_9router` |
 | `CLIPROXY_BACKUP_DIR` | `$HOME/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth` |
+| `CXSW_SESSION_SYNC` | `1`; set `0` to skip automatic session repair on switch |
 | `PYTHON_BIN` | `python3` |
 | `CODEX_APP_PATH` | `/Applications/Codex.app` |
 
@@ -169,6 +173,35 @@ that value takes precedence over the local default.
 
 Switching back to `native` removes only those managed regions. Your other Codex
 settings are left unchanged.
+
+## Session Repair
+
+Codex stores raw conversations in `~/.codex/sessions/`, but its visible thread
+list is also indexed in `~/.codex/state_5.sqlite` and
+`~/.codex/session_index.jsonl`. When switching between `native`, `cliproxy`,
+and `9router`, older threads can stay tagged with the previous provider and
+disappear from provider-filtered views.
+
+By default, `cxsw use <mode>` runs session repair after the backend switch. It:
+
+- backs up `state_5.sqlite` and `session_index.jsonl` under
+  `~/.codex/backups/cxsw-sessions/`;
+- scans every rollout in `~/.codex/sessions/**/*.jsonl`;
+- rewrites only the `session_meta.payload.model_provider` metadata in rollout
+  files when needed, with rollout backups;
+- backfills missing SQLite thread rows and rebuilds `session_index.jsonl`;
+- adopts local thread metadata to the active provider (`openai`, `cliproxy`, or
+  `r9router`) so old conversations remain visible after switching.
+
+Run it manually when needed:
+
+```bash
+cxsw repair-sessions --dry-run
+cxsw repair-sessions
+```
+
+Set `CXSW_SESSION_SYNC=0` if you only want backend switching and no automatic
+session metadata changes.
 
 ## Local State and Privacy
 

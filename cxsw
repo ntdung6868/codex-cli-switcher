@@ -86,6 +86,10 @@ acquire_lock() {
     fi
     lock_pid=""
     [[ -f "$LOCK_PID_FILE" ]] && lock_pid="$(cat "$LOCK_PID_FILE" 2>/dev/null || true)"
+    if [[ -z "$lock_pid" && -d "$LOCK_DIR" && "$waited" -gt 0 ]]; then
+      rm -rf "$LOCK_DIR"
+      [[ ! -d "$LOCK_DIR" ]] && continue
+    fi
     if [[ -n "$lock_pid" && "$lock_pid" != "$$" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
       rm -rf "$LOCK_DIR"; continue
     fi
@@ -111,6 +115,15 @@ set_active_mode() {
   chmod 600 "$ACTIVE_MODE" 2>/dev/null || true
 }
 
+provider_id_for_mode() {
+  case "$1" in
+    native|openai) print -- "openai" ;;
+    cliproxy)      print -- "cliproxy" ;;
+    9router|r9router) print -- "r9router" ;;
+    *)             print -- "$1" ;;
+  esac
+}
+
 # Snapshot the current native config the first time we run, so we can rollback.
 maybe_snapshot_native() {
   ensure_dirs
@@ -125,6 +138,35 @@ maybe_snapshot_native() {
     cp -p "$CODEX_AUTH" "$SNAPSHOT_DIR/native-auth.json"
     chmod 600 "$SNAPSHOT_DIR/native-auth.json"
   fi
+}
+
+# ============================================================================
+# Session index repair
+# ============================================================================
+
+session_sync_enabled() {
+  case "${CXSW_SESSION_SYNC:-1}" in
+    0|false|FALSE|no|NO) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+repair_codex_sessions_for_mode() {
+  local mode="$1" provider
+  session_sync_enabled || return 0
+  provider="$(provider_id_for_mode "$mode")"
+  if [[ ! -f "$LIB_DIR/codex-sessions.py" ]]; then
+    print -u2 -- "Warning: session repair helper missing: $LIB_DIR/codex-sessions.py"
+    return 0
+  fi
+  "$PYTHON_BIN" "$LIB_DIR/codex-sessions.py" repair \
+    --codex-home "$CODEX_HOME" \
+    --provider "$provider" || print -u2 -- "Warning: session repair failed. Run 'cxsw repair-sessions' for details."
+}
+
+session_status_line() {
+  [[ -f "$LIB_DIR/codex-sessions.py" ]] || return 0
+  "$PYTHON_BIN" "$LIB_DIR/codex-sessions.py" status --codex-home "$CODEX_HOME" 2>/dev/null || true
 }
 
 # ============================================================================
@@ -408,6 +450,7 @@ switch_to_cliproxy() {
   set_active_mode cliproxy
   print -- "Switched Codex CLI → CLIProxyAPI ($CLIPROXY_BASE_URL)"
   print -- "Auth: uses \$CLIPROXY_API_KEY when set, otherwise falls back to the default local token."
+  repair_codex_sessions_for_mode cliproxy
 }
 
 switch_to_9router() {
@@ -417,6 +460,7 @@ switch_to_9router() {
   set_active_mode 9router
   print -- "Switched Codex CLI → 9Router ($NINEROUTER_BASE_URL)"
   print -- "Auth: uses \$NINEROUTER_API_KEY when set, otherwise falls back to the default local token."
+  repair_codex_sessions_for_mode 9router
 }
 
 switch_to_native() {
@@ -431,6 +475,7 @@ switch_to_native() {
   fi
   set_active_mode native
   print -- "Switched Codex CLI → native ChatGPT subscription (auth.json)."
+  repair_codex_sessions_for_mode native
 }
 
 # ============================================================================
@@ -678,6 +723,9 @@ menu_status() {
   r9_n="$(sqlite3 "$NINEROUTER_DB" "SELECT COUNT(*) FROM providerConnections WHERE provider='codex' AND isActive=1;" 2>/dev/null || print 0)"
   ui_print "  • CLIProxyAPI auth files:   $cli_n"
   ui_print "  • 9Router codex providers: $r9_n (active)"
+  ui_print ""
+  ui_print "%F{cyan}Codex sessions%f"
+  session_status_line | while IFS= read -r line; do ui_print "  • $line"; done
   ui_pause
 }
 
@@ -688,6 +736,7 @@ menu_import() {
       "Restore Codex OAuth backup → CLIProxyAPI auth dir" \
       "Restore Codex OAuth backup → 9Router DB" \
       "Sync CLIProxyAPI auth dir   → 9Router DB" \
+      "Repair Codex session index/provider visibility" \
       "Back")"; then
     return
   fi
@@ -697,7 +746,8 @@ menu_import() {
     1) out="$( (import_backup_to_cliproxy) 2>&1 )" || rc=$? ;;
     2) out="$( (import_backup_to_9router) 2>&1 )" || rc=$? ;;
     3) out="$( (import_cliproxy_to_9router) 2>&1 )" || rc=$? ;;
-    4) release_lock; return ;;
+    4) out="$( (repair_codex_sessions_for_mode "$(active_mode)") 2>&1 )" || rc=$? ;;
+    5) release_lock; return ;;
   esac
   release_lock
   ui_print ""
@@ -785,6 +835,10 @@ Usage:
   cxsw import-backup-cliproxy   Restore backup → ~/.cli-proxy-api/
   cxsw import-backup-9router    Restore backup → 9Router DB
   cxsw sync-cliproxy-9router    Sync ~/.cli-proxy-api/ → 9Router DB
+  cxsw repair-sessions          Rebuild Codex session index and make old
+                                threads visible for the active backend
+  cxsw repair-sessions --dry-run
+                                Show what would be repaired
   cxsw init                  Create dirs + snapshot native config (idempotent)
   cxsw help                  Show this help
 
@@ -799,6 +853,7 @@ Environment variables:
   NINEROUTER_BASE_URL      (default: http://127.0.0.1:20128/v1)
   NINEROUTER_API_KEY       (optional override; default bearer token: sk_9router)
   CLIPROXY_BACKUP_DIR      (default: ~/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth)
+  CXSW_SESSION_SYNC        Set to 0 to skip automatic session repair on switch
   PYTHON_BIN               (default: python3)
   CODEX_APP_PATH           (default: /Applications/Codex.app)
 EOF
@@ -868,7 +923,8 @@ case "$cmd" in
     print -- "Mode: $mode"
     for m in cliproxy 9router native; do
       print -- "  $m: $(backend_status_line "$m")"
-    done ;;
+    done
+    session_status_line ;;
   current)
     active_mode ;;
   import-backup-cliproxy)
@@ -877,6 +933,27 @@ case "$cmd" in
     acquire_lock; import_backup_to_9router ;;
   sync-cliproxy-9router)
     acquire_lock; import_cliproxy_to_9router ;;
+  repair-sessions|sync-sessions)
+    shift
+    acquire_lock
+    provider_arg=""
+    for a in "$@"; do
+      case "$a" in
+        --provider|--provider=*) provider_arg="present" ;;
+        --mode|--mode=*) provider_arg="present" ;;
+      esac
+    done
+    if [[ -z "$provider_arg" ]]; then
+      "$PYTHON_BIN" "$LIB_DIR/codex-sessions.py" repair \
+        --codex-home "$CODEX_HOME" \
+        --provider "$(provider_id_for_mode "$(active_mode)")" \
+        "$@"
+    else
+      "$PYTHON_BIN" "$LIB_DIR/codex-sessions.py" repair \
+        --codex-home "$CODEX_HOME" \
+        "$@"
+    fi
+    release_lock ;;
   -h|--help|help)
     usage ;;
   *)

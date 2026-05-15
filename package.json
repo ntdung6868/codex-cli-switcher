@@ -1,6 +1,6 @@
 {
   "name": "codex-cli-switcher",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A macOS command-line switcher for routing OpenAI Codex CLI between native ChatGPT, CLIProxyAPI, and 9Router backends.",
   "license": "MIT",
   "author": "ntdung6868 <ntdungqlqb@gmail.com>",
@@ -21,6 +21,7 @@
     "cxsw",
     "lib/codex-config.py",
     "lib/codex-doctor.py",
+    "lib/codex-sessions.py",
     "lib/import-9router.py",
     "README.md",
     "LICENSE",
@@ -39,7 +40,7 @@
     "macos"
   ],
   "scripts": {
-    "check": "zsh -n cxsw && python3 -m py_compile lib/codex-config.py lib/codex-doctor.py lib/import-9router.py",
+    "check": "zsh -n cxsw && python3 -m py_compile lib/codex-config.py lib/codex-doctor.py lib/codex-sessions.py lib/import-9router.py",
     "pack:dry": "npm pack --dry-run"
   }
 }
