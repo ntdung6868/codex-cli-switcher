@@ -29,9 +29,26 @@ CLIPROXY_FALLBACK_KEY="your-api-key-1"
 CLIPROXY_DEFAULT_KEY="${CLIPROXY_API_KEY:-$CLIPROXY_FALLBACK_KEY}"
 
 NINEROUTER_DB="${NINEROUTER_DB:-$HOME/.9router/db/data.sqlite}"
-NINEROUTER_BASE_URL="${NINEROUTER_BASE_URL:-http://127.0.0.1:20128/v1}"
 NINEROUTER_FALLBACK_KEY="sk_9router"
 NINEROUTER_DEFAULT_KEY="${NINEROUTER_API_KEY:-$NINEROUTER_FALLBACK_KEY}"
+
+# 9router cannot decompress gzip request bodies, so resuming a large
+# conversation fails with {"error":{"message":"Invalid JSON body",...}}.
+# cxsw runs a tiny loopback shim that gunzips requests before 9router.
+# The shim is on by default; set CXSW_9ROUTER_SHIM=0 to talk to 9router
+# directly (only safe for short, non-resumed sessions).
+NINEROUTER_UPSTREAM_URL="${NINEROUTER_UPSTREAM_URL:-${NINEROUTER_BASE_URL:-http://127.0.0.1:20128/v1}}"
+CXSW_9ROUTER_SHIM="${CXSW_9ROUTER_SHIM:-1}"
+NINEROUTER_SHIM_HOST="127.0.0.1"
+NINEROUTER_SHIM_PORT="${NINEROUTER_SHIM_PORT:-20127}"
+NINEROUTER_SHIM_URL="http://${NINEROUTER_SHIM_HOST}:${NINEROUTER_SHIM_PORT}/v1"
+if [[ "$CXSW_9ROUTER_SHIM" == "1" ]]; then
+  NINEROUTER_BASE_URL="$NINEROUTER_SHIM_URL"
+else
+  NINEROUTER_BASE_URL="$NINEROUTER_UPSTREAM_URL"
+fi
+SHIM_PID_FILE="$STATE_DIR/9router-shim.pid"
+SHIM_LOG_FILE="$STATE_DIR/9router-shim.log"
 
 CLIPROXY_BACKUP_DIR="${CLIPROXY_BACKUP_DIR:-$HOME/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth}"
 
@@ -440,12 +457,91 @@ APPLESCRIPT
 restart_codex_app() { hot_reload_codex_app; }
 
 # ============================================================================
+# 9router gunzip shim
+# ============================================================================
+
+shim_alive() {
+  [[ -f "$SHIM_PID_FILE" ]] || return 1
+  local pid; pid="$(cat "$SHIM_PID_FILE" 2>/dev/null)" || return 1
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+shim_port_up() {
+  curl -sS -o /dev/null -m 2 "$NINEROUTER_SHIM_URL/models" 2>/dev/null
+  local rc=$?
+  # Any HTTP reply (even 401/404) means the listener is accepting connections.
+  [[ $rc -eq 0 || $rc -eq 22 ]]
+}
+
+start_9router_shim() {
+  [[ "$CXSW_9ROUTER_SHIM" == "1" ]] || return 0
+  [[ -f "$LIB_DIR/ungzip-proxy.py" ]] || { print -u2 -- "Warning: ungzip-proxy.py missing — 9router used directly (resume of large chats will fail)."; return 0; }
+  if shim_alive && shim_port_up; then
+    return 0
+  fi
+  stop_9router_shim
+  mkdir -p "$STATE_DIR"
+  nohup "$PYTHON_BIN" "$LIB_DIR/ungzip-proxy.py" \
+    --listen "${NINEROUTER_SHIM_HOST}:${NINEROUTER_SHIM_PORT}" \
+    --upstream "$NINEROUTER_UPSTREAM_URL" \
+    >"$SHIM_LOG_FILE" 2>&1 &
+  local pid=$!
+  disown 2>/dev/null || true
+  print -- "$pid" > "$SHIM_PID_FILE"
+  chmod 600 "$SHIM_PID_FILE" 2>/dev/null || true
+  local waited=0
+  while (( waited < 10 )); do
+    shim_port_up && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5; (( waited++ )) || true
+  done
+  if shim_port_up; then
+    print -- "9router gunzip shim ready: $NINEROUTER_SHIM_URL → $NINEROUTER_UPSTREAM_URL"
+  else
+    print -u2 -- "Warning: 9router shim failed to start — see $SHIM_LOG_FILE"
+  fi
+}
+
+stop_9router_shim() {
+  [[ -f "$SHIM_PID_FILE" ]] || return 0
+  local pid; pid="$(cat "$SHIM_PID_FILE" 2>/dev/null)" || pid=""
+  if [[ -n "$pid" ]]; then
+    kill "$pid" 2>/dev/null || true
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+      (( waited >= 6 )) && { kill -9 "$pid" 2>/dev/null || true; break; }
+      sleep 0.5; (( waited++ )) || true
+    done
+  fi
+  rm -f "$SHIM_PID_FILE" 2>/dev/null || true
+}
+
+cmd_shim() {
+  case "${1:-status}" in
+    status)
+      if shim_alive && shim_port_up; then
+        print -- "9router shim: running ($NINEROUTER_SHIM_URL → $NINEROUTER_UPSTREAM_URL)"
+      elif [[ "$CXSW_9ROUTER_SHIM" != "1" ]]; then
+        print -- "9router shim: disabled (CXSW_9ROUTER_SHIM=0)"
+      else
+        print -- "9router shim: stopped"
+      fi
+      ;;
+    start)   start_9router_shim ;;
+    stop)    stop_9router_shim; print -- "9router shim stopped." ;;
+    restart) stop_9router_shim; start_9router_shim ;;
+    *) die "usage: cxsw shim {status|start|stop|restart}" ;;
+  esac
+}
+
+# ============================================================================
 # Mode switches
 # ============================================================================
 
 switch_to_cliproxy() {
   [[ -f "$CODEX_CONFIG" ]] || die "no Codex config at $CODEX_CONFIG — run codex once first."
   maybe_snapshot_native
+  stop_9router_shim
   apply_config_for_mode cliproxy
   set_active_mode cliproxy
   print -- "Switched Codex CLI → CLIProxyAPI ($CLIPROXY_BASE_URL)"
@@ -456,6 +552,7 @@ switch_to_cliproxy() {
 switch_to_9router() {
   [[ -f "$CODEX_CONFIG" ]] || die "no Codex config at $CODEX_CONFIG — run codex once first."
   maybe_snapshot_native
+  start_9router_shim
   apply_config_for_mode 9router
   set_active_mode 9router
   print -- "Switched Codex CLI → 9Router ($NINEROUTER_BASE_URL)"
@@ -466,6 +563,7 @@ switch_to_9router() {
 switch_to_native() {
   [[ -f "$CODEX_CONFIG" ]] || die "no Codex config at $CODEX_CONFIG — run codex once first."
   maybe_snapshot_native
+  stop_9router_shim
   apply_config_for_mode native
   # If the native auth.json was removed but we have a snapshot, restore it.
   if [[ ! -s "$CODEX_AUTH" && -s "$SNAPSHOT_DIR/native-auth.json" ]]; then
@@ -832,6 +930,9 @@ Usage:
                                         Codex.app falsely reports as missing)
   cxsw status                Print mode + backend health
   cxsw current               Print active mode name only
+  cxsw shim [status|start|stop|restart]
+                             Manage the 9router gunzip shim (auto-managed by
+                             'cxsw use'; fixes "Invalid JSON body" on resume)
   cxsw import-backup-cliproxy   Restore backup → ~/.cli-proxy-api/
   cxsw import-backup-9router    Restore backup → 9Router DB
   cxsw sync-cliproxy-9router    Sync ~/.cli-proxy-api/ → 9Router DB
@@ -850,8 +951,12 @@ Environment variables:
   CLIPROXY_BASE_URL        (default: http://127.0.0.1:8317/v1)
   CLIPROXY_API_KEY         (optional override; default bearer token: your-api-key-1)
   NINEROUTER_DB            (default: ~/.9router/db/data.sqlite)
-  NINEROUTER_BASE_URL      (default: http://127.0.0.1:20128/v1)
+  NINEROUTER_UPSTREAM_URL  Real 9router URL (default: http://127.0.0.1:20128/v1)
+  NINEROUTER_BASE_URL      Legacy alias for NINEROUTER_UPSTREAM_URL
   NINEROUTER_API_KEY       (optional override; default bearer token: sk_9router)
+  CXSW_9ROUTER_SHIM        1 (default) = run gunzip shim so resuming large
+                           conversations works; 0 = talk to 9router directly
+  NINEROUTER_SHIM_PORT     Loopback port for the gunzip shim (default: 20127)
   CLIPROXY_BACKUP_DIR      (default: ~/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth)
   CXSW_SESSION_SYNC        Set to 0 to skip automatic session repair on switch
   PYTHON_BIN               (default: python3)
@@ -927,6 +1032,8 @@ case "$cmd" in
     session_status_line ;;
   current)
     active_mode ;;
+  shim)
+    shift; cmd_shim "${1:-status}" ;;
   import-backup-cliproxy)
     acquire_lock; import_backup_to_cliproxy ;;
   import-backup-9router)
