@@ -24,7 +24,10 @@ profile.
 - Probe backend health from the CLI or interactive menu.
 - Relaunch, quit, or hot-reload Codex.app after changing backends.
 - Diagnose plugin/marketplace mismatches that can trigger Codex.app crash overlays.
-- Import and sync Codex OAuth account JSON files into CLIProxyAPI and 9Router.
+- Disable app-backed plugins while proxy mode is active so `codex_apps` does not
+  fail on a stale native `~/.codex/auth.json` OAuth token.
+- Restore Codex OAuth account JSON files into CLIProxyAPI. 9Router Codex OAuth
+  imports stay behind an explicit unsafe opt-in to avoid double refreshers.
 - Repair Codex local session indexes so old threads stay visible after switching backends.
 - Package as a single npm-installed `cxsw` command with no runtime npm dependencies.
 
@@ -67,14 +70,19 @@ cxsw use 9router
 cxsw use native
 ```
 
-By default, `cxsw use <mode>` updates Codex CLI configuration only. If Codex.app
-is running, restart it so the app-server reads the new backend:
+By default, `cxsw use <mode>` refuses unsafe switches while Codex.app or an
+interactive `codex` session is still running. This prevents a resumed thread
+from keeping stale backend/auth state after you switch. Use one of the reload
+forms for app sessions:
 
 ```bash
 cxsw use --relaunch cliproxy
 cxsw relaunch-app
 cxsw quit-app
 ```
+
+If you intentionally want the old "rewrite config only" behavior, add
+`--allow-live-sessions`.
 
 Advanced hot reload is also available:
 
@@ -119,10 +127,11 @@ cxsw hot-reload              # advanced app-server reload
 
 cxsw doctor                  # inspect plugin/marketplace mismatches
 cxsw doctor --fix            # comment out orphaned plugin entries
+cxsw plugin-guard status     # show proxy-mode plugin guard state
 
 cxsw import-backup-cliproxy  # backup OAuth JSON files to CLIProxyAPI dir
-cxsw import-backup-9router   # backup OAuth JSON files to 9Router SQLite
-cxsw sync-cliproxy-9router   # CLIProxyAPI auth dir to 9Router SQLite
+cxsw import-backup-9router   # unsafe opt-in: backup OAuth files to 9Router SQLite
+cxsw sync-cliproxy-9router   # unsafe opt-in: CLIProxyAPI auth dir to 9Router SQLite
 cxsw repair-sessions         # rebuild session index + adopt threads to active backend
 cxsw repair-sessions --dry-run
 ```
@@ -142,6 +151,8 @@ cxsw repair-sessions --dry-run
 | `NINEROUTER_API_KEY` | optional override; default bearer token is `sk_9router` |
 | `CLIPROXY_BACKUP_DIR` | `$HOME/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth` |
 | `CXSW_SESSION_SYNC` | `1`; set `0` to skip automatic session repair on switch |
+| `CXSW_PROXY_PLUGIN_GUARD` | `1`; set `0` to keep non-bundled plugins enabled in proxy mode |
+| `CXSW_LIVE_SESSION_GUARD` | `1`; set `0` to allow switching while Codex.app/codex sessions are live |
 | `PYTHON_BIN` | `python3` |
 | `CODEX_APP_PATH` | `/Applications/Codex.app` |
 
@@ -173,6 +184,19 @@ that value takes precedence over the local default.
 
 Switching back to `native` removes only those managed regions. Your other Codex
 settings are left unchanged.
+
+## Proxy Plugin Guard
+
+Codex can route model calls through `cliproxy` or `9router` while the native
+`~/.codex/auth.json` token is stale. App-backed plugins such as GitHub and
+Vercel still start through Codex's native OAuth path, though, and can fail MCP
+startup with `token_revoked`.
+
+When `CXSW_PROXY_PLUGIN_GUARD=1`, switching to `cliproxy` or `9router`
+temporarily disables enabled non-bundled plugins and records exactly which ones
+it changed under `~/.local/state/cxsw/proxy-plugin-guard.json`. Switching back
+to `native` restores only that recorded set. Bundled local plugins such as
+`browser@openai-bundled` are left alone.
 
 ## Session Repair
 

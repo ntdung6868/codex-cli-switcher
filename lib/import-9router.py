@@ -15,7 +15,7 @@ The `data` JSON mirrors the shape 9router writes itself, including
 Dedup rule: skip rows where (provider='codex' AND email=...) already exists.
 """
 from __future__ import annotations
-import argparse, base64, datetime as dt, json, pathlib, sqlite3, sys, uuid
+import argparse, base64, datetime as dt, json, os, pathlib, sqlite3, sys, uuid
 
 def b64url(s: str) -> bytes:
     pad = "=" * (-len(s) % 4)
@@ -75,6 +75,8 @@ def transform(auth: dict) -> dict:
     }
 
 def main() -> int:
+    if os.environ.get("ALLOW_UNSAFE_9ROUTER_CODEX_IMPORT") != "1":
+        sys.exit("DISABLED: importing Codex OAuth into 9Router creates a second refresher risk. Keep CLIProxyAPI as the single owner, or set ALLOW_UNSAFE_9ROUTER_CODEX_IMPORT=1 for forensic-only use.")
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True, help="directory of codex-*.json")
     ap.add_argument("--db", required=True, help="path to 9router data.sqlite")

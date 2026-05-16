@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.4 - 2026-05-16
+
+- Add a proxy plugin guard that disables non-bundled app-backed plugins in
+  `cliproxy`/`9router` modes and restores them when returning to `native`. This
+  prevents `codex_apps` MCP startup from failing on a stale native
+  `~/.codex/auth.json` OAuth token while model calls are proxied.
+- Add live-session preflight for `cxsw use`: by default it now refuses unsafe
+  switches while Codex.app or an interactive `codex` session is still running.
+  Use `--relaunch`, `--quit-app`, `--hot-reload`, or the explicit
+  `--allow-live-sessions` override.
+- Keep the unsafe 9Router Codex OAuth import paths behind
+  `ALLOW_UNSAFE_9ROUTER_CODEX_IMPORT` so CLIProxyAPI remains the single
+  refresher for Codex OAuth files.
+
 ## 1.0.3 - 2026-05-16
 
 - Fix `{"error":{"message":"Invalid JSON body",...}}` from 9router when resuming a large/continued conversation. Root cause: Codex CLI gzip-compresses large request bodies, and 9router does not decompress gzip request bodies (a fresh short prompt stays uncompressed and works, which is why the config looked fine).

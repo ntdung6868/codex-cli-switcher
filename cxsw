@@ -18,6 +18,7 @@ ACTIVE_MODE="$STATE_DIR/active.mode"
 LIB_DIR="$INSTALL_DIR/lib"
 LOCK_DIR="$STATE_DIR/.lock"
 LOCK_PID_FILE="$LOCK_DIR/pid"
+PROXY_PLUGIN_GUARD_STATE="$STATE_DIR/proxy-plugin-guard.json"
 
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 CODEX_AUTH="$CODEX_HOME/auth.json"
@@ -187,6 +188,42 @@ session_status_line() {
 }
 
 # ============================================================================
+# Proxy plugin guard
+# ============================================================================
+
+proxy_plugin_guard_enabled() {
+  case "${CXSW_PROXY_PLUGIN_GUARD:-1}" in
+    0|false|FALSE|no|NO) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+apply_proxy_plugin_guard_for_mode() {
+  local mode="$1" action
+  proxy_plugin_guard_enabled || return 0
+  [[ -f "$LIB_DIR/codex-plugin-guard.py" ]] || {
+    print -u2 -- "Warning: plugin guard helper missing: $LIB_DIR/codex-plugin-guard.py"
+    return 0
+  }
+  case "$mode" in
+    cliproxy|9router) action="guard" ;;
+    native)           action="restore" ;;
+    *)                return 0 ;;
+  esac
+  "$PYTHON_BIN" "$LIB_DIR/codex-plugin-guard.py" "$action" \
+    --config "$CODEX_CONFIG" \
+    --state "$PROXY_PLUGIN_GUARD_STATE" \
+    || print -u2 -- "Warning: proxy plugin guard failed. Run 'cxsw plugin-guard status' for details."
+}
+
+proxy_plugin_guard_status_line() {
+  [[ -f "$LIB_DIR/codex-plugin-guard.py" ]] || return 0
+  "$PYTHON_BIN" "$LIB_DIR/codex-plugin-guard.py" status \
+    --config "$CODEX_CONFIG" \
+    --state "$PROXY_PLUGIN_GUARD_STATE" 2>/dev/null || true
+}
+
+# ============================================================================
 # Backend probe (simple health check)
 # ============================================================================
 
@@ -262,6 +299,30 @@ codex_cli_session_running() {
   pgrep -fl 'codex( resume| exec| chat|$)' 2>/dev/null \
     | grep -vE 'cxsw|app-server|Codex\.app' \
     | grep -q . 2>/dev/null
+}
+
+live_session_guard_enabled() {
+  case "${CXSW_LIVE_SESSION_GUARD:-1}" in
+    0|false|FALSE|no|NO) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+preflight_live_sessions_for_switch() {
+  local reload_mode="$1" allow_live="$2"
+  [[ "$allow_live" == "1" ]] && return 0
+  live_session_guard_enabled || return 0
+
+  local msg=""
+  if codex_cli_session_running; then
+    msg+="A 'codex' interactive/resume session is running. Exit it before switching so the resumed thread restarts with the new backend."$'\n'
+  fi
+  if codex_app_running && [[ "$reload_mode" == "none" ]]; then
+    msg+="Codex.app is running and caches config.toml/auth state. Use --relaunch, --quit-app, or --hot-reload for this switch."$'\n'
+  fi
+  if [[ -n "$msg" ]]; then
+    die "${msg}Override only if you accept stale backend/session state: add --allow-live-sessions or set CXSW_LIVE_SESSION_GUARD=0."
+  fi
 }
 
 relaunch_codex_app() {
@@ -543,6 +604,7 @@ switch_to_cliproxy() {
   maybe_snapshot_native
   stop_9router_shim
   apply_config_for_mode cliproxy
+  apply_proxy_plugin_guard_for_mode cliproxy
   set_active_mode cliproxy
   print -- "Switched Codex CLI → CLIProxyAPI ($CLIPROXY_BASE_URL)"
   print -- "Auth: uses \$CLIPROXY_API_KEY when set, otherwise falls back to the default local token."
@@ -554,6 +616,7 @@ switch_to_9router() {
   maybe_snapshot_native
   start_9router_shim
   apply_config_for_mode 9router
+  apply_proxy_plugin_guard_for_mode 9router
   set_active_mode 9router
   print -- "Switched Codex CLI → 9Router ($NINEROUTER_BASE_URL)"
   print -- "Auth: uses \$NINEROUTER_API_KEY when set, otherwise falls back to the default local token."
@@ -565,6 +628,7 @@ switch_to_native() {
   maybe_snapshot_native
   stop_9router_shim
   apply_config_for_mode native
+  apply_proxy_plugin_guard_for_mode native
   # If the native auth.json was removed but we have a snapshot, restore it.
   if [[ ! -s "$CODEX_AUTH" && -s "$SNAPSHOT_DIR/native-auth.json" ]]; then
     cp -p "$SNAPSHOT_DIR/native-auth.json" "$CODEX_AUTH"
@@ -599,6 +663,7 @@ import_backup_to_cliproxy() {
 }
 
 import_cliproxy_to_9router() {
+  [[ "${ALLOW_UNSAFE_9ROUTER_CODEX_IMPORT:-}" == "1" ]] || die "disabled: syncing Codex OAuth into 9Router creates a second refresher risk; keep CLIProxyAPI as single owner"
   [[ -d "$CLIPROXY_AUTH_DIR" ]] || die "auth dir not found: $CLIPROXY_AUTH_DIR"
   [[ -f "$NINEROUTER_DB" ]] || die "9router DB not found: $NINEROUTER_DB"
   "$PYTHON_BIN" "$LIB_DIR/import-9router.py" \
@@ -606,6 +671,7 @@ import_cliproxy_to_9router() {
 }
 
 import_backup_to_9router() {
+  [[ "${ALLOW_UNSAFE_9ROUTER_CODEX_IMPORT:-}" == "1" ]] || die "disabled: restoring Codex OAuth into 9Router creates a second refresher risk; keep CLIProxyAPI as single owner"
   [[ -d "$CLIPROXY_BACKUP_DIR" ]] || die "backup dir not found: $CLIPROXY_BACKUP_DIR"
   [[ -f "$NINEROUTER_DB" ]] || die "9router DB not found: $NINEROUTER_DB"
   "$PYTHON_BIN" "$LIB_DIR/import-9router.py" \
@@ -720,6 +786,27 @@ menu_switch() {
       "Native ChatGPT subscription  (revert to ~/.codex/auth.json)")"; then
     return
   fi
+  local reload_after="none"
+  if live_session_guard_enabled; then
+    if codex_cli_session_running; then
+      ui_print ""
+      ui_print "%F{yellow}A 'codex' interactive/resume session is open. Switching underneath it can keep stale backend/session state.%f"
+      if ! confirm "Continue switch anyway?"; then
+        ui_print "%F{8}Cancelled. Exit the open codex session, then switch again.%f"
+        ui_pause; return
+      fi
+    fi
+    if codex_app_running; then
+      ui_print ""
+      ui_print "%F{yellow}Codex.app is running and caches config.toml/auth state.%f"
+      if confirm "Switch and relaunch Codex.app after writing config?"; then
+        reload_after="relaunch"
+      else
+        ui_print "%F{8}Cancelled. Use 'cxsw use --allow-live-sessions <mode>' only if you accept stale app state.%f"
+        ui_pause; return
+      fi
+    fi
+  fi
   acquire_lock
   local rc=0 err=""
   case "$choice" in
@@ -737,7 +824,12 @@ menu_switch() {
   fi
 
   # Ask user whether they want to relaunch Codex.app.
-  if codex_app_running; then
+  if [[ "$reload_after" == "relaunch" ]]; then
+    ui_print ""
+    ui_print "%F{cyan}Relaunching Codex.app…%f"
+    relaunch_codex_app
+    ui_print "%F{green}✓ Done.%f"
+  elif codex_app_running; then
     ui_print ""
     ui_print "%F{yellow}Codex.app is running — it caches config.toml until restart.%f"
     if confirm "Relaunch Codex.app now? (window will reopen)"; then
@@ -824,6 +916,9 @@ menu_status() {
   ui_print ""
   ui_print "%F{cyan}Codex sessions%f"
   session_status_line | while IFS= read -r line; do ui_print "  • $line"; done
+  ui_print ""
+  ui_print "%F{cyan}Proxy plugin guard%f"
+  proxy_plugin_guard_status_line | while IFS= read -r line; do ui_print "  • $line"; done
   ui_pause
 }
 
@@ -832,8 +927,8 @@ menu_import() {
   local choice
   if ! choice="$(menu_select "Import / Sync:" \
       "Restore Codex OAuth backup → CLIProxyAPI auth dir" \
-      "Restore Codex OAuth backup → 9Router DB" \
-      "Sync CLIProxyAPI auth dir   → 9Router DB" \
+      "Unsafe opt-in: restore Codex OAuth backup → 9Router DB" \
+      "Unsafe opt-in: sync CLIProxyAPI auth dir   → 9Router DB" \
       "Repair Codex session index/provider visibility" \
       "Back")"; then
     return
@@ -914,12 +1009,14 @@ cxsw — Codex Backend Switcher
 
 Usage:
   cxsw                       Open the interactive menu
-  cxsw use cliproxy                     Switch only (Codex.app left alone)
-  cxsw use 9router                      Switch only (Codex.app left alone)
-  cxsw use native                       Switch only (Codex.app left alone)
+  cxsw use cliproxy                     Switch backend (guards live sessions)
+  cxsw use 9router                      Switch backend (guards live sessions)
+  cxsw use native                       Switch backend (guards live sessions)
   cxsw use --relaunch <mode>            Switch + full quit + reopen Codex.app
   cxsw use --quit-app <mode>            Switch + quit Codex.app (no relaunch)
   cxsw use --hot-reload <mode>          [advanced] Kill app-server child only
+  cxsw use --allow-live-sessions <mode> Switch even if Codex.app/codex sessions
+                                        are still running (old behavior; unsafe)
   cxsw relaunch-app                     Quit + reopen Codex.app
   cxsw quit-app                         Quit Codex.app
   cxsw hot-reload                       [advanced] Kill app-server child only
@@ -933,9 +1030,11 @@ Usage:
   cxsw shim [status|start|stop|restart]
                              Manage the 9router gunzip shim (auto-managed by
                              'cxsw use'; fixes "Invalid JSON body" on resume)
+  cxsw plugin-guard [status|guard|restore]
+                             Manage proxy-mode plugin guard for codex_apps OAuth
   cxsw import-backup-cliproxy   Restore backup → ~/.cli-proxy-api/
-  cxsw import-backup-9router    Restore backup → 9Router DB
-  cxsw sync-cliproxy-9router    Sync ~/.cli-proxy-api/ → 9Router DB
+  cxsw import-backup-9router    Unsafe opt-in: restore backup → 9Router DB
+  cxsw sync-cliproxy-9router    Unsafe opt-in: sync ~/.cli-proxy-api/ → 9Router DB
   cxsw repair-sessions          Rebuild Codex session index and make old
                                 threads visible for the active backend
   cxsw repair-sessions --dry-run
@@ -959,6 +1058,9 @@ Environment variables:
   NINEROUTER_SHIM_PORT     Loopback port for the gunzip shim (default: 20127)
   CLIPROXY_BACKUP_DIR      (default: ~/Documents/Backups/codex-oauth-backup/cli-proxy-api-auth)
   CXSW_SESSION_SYNC        Set to 0 to skip automatic session repair on switch
+  CXSW_PROXY_PLUGIN_GUARD  1 (default) = disable non-bundled plugins in proxy
+                           modes and restore them on native mode
+  CXSW_LIVE_SESSION_GUARD  1 (default) = refuse unsafe non-reloaded switches
   PYTHON_BIN               (default: python3)
   CODEX_APP_PATH           (default: /Applications/Codex.app)
 EOF
@@ -983,6 +1085,7 @@ case "$cmd" in
     # --quit-app  : full quit, no relaunch
     # --hot-reload: kill app-server child only (advanced; may show crash UI)
     reload_mode="none"
+    allow_live="0"
     args=()
     for a in "$@"; do
       case "$a" in
@@ -990,18 +1093,23 @@ case "$cmd" in
         --relaunch|--restart-app) reload_mode="relaunch" ;;
         --quit-app) reload_mode="quit" ;;
         --hot-reload) reload_mode="hot" ;;
+        --allow-live-session|--allow-live-sessions) allow_live="1" ;;
         *) args+=("$a") ;;
       esac
     done
     set -- "${args[@]}"
-    [[ $# -ge 1 ]] || die "usage: cxsw use [--no-reload|--relaunch|--quit-app|--hot-reload] <cliproxy|9router|native>"
+    [[ $# -ge 1 ]] || die "usage: cxsw use [--no-reload|--relaunch|--quit-app|--hot-reload|--allow-live-sessions] <cliproxy|9router|native>"
     target="$1"
+    case "$target" in
+      cliproxy|9router|native) ;;
+      *) die "unknown mode: $target" ;;
+    esac
+    preflight_live_sessions_for_switch "$reload_mode" "$allow_live"
     acquire_lock
     case "$target" in
       cliproxy) switch_to_cliproxy ;;
       9router)  switch_to_9router ;;
       native)   switch_to_native ;;
-      *)        die "unknown mode: $target" ;;
     esac
     release_lock
     if codex_app_running; then
@@ -1029,11 +1137,23 @@ case "$cmd" in
     for m in cliproxy 9router native; do
       print -- "  $m: $(backend_status_line "$m")"
     done
-    session_status_line ;;
+    session_status_line
+    proxy_plugin_guard_status_line ;;
   current)
     active_mode ;;
   shim)
     shift; cmd_shim "${1:-status}" ;;
+  plugin-guard|plugins-guard|proxy-plugin-guard)
+    shift
+    sub="${1:-status}"
+    [[ -f "$LIB_DIR/codex-plugin-guard.py" ]] || die "plugin guard helper missing: $LIB_DIR/codex-plugin-guard.py"
+    case "$sub" in
+      status|guard|restore)
+        "$PYTHON_BIN" "$LIB_DIR/codex-plugin-guard.py" "$sub" \
+          --config "$CODEX_CONFIG" \
+          --state "$PROXY_PLUGIN_GUARD_STATE" ;;
+      *) die "usage: cxsw plugin-guard {status|guard|restore}" ;;
+    esac ;;
   import-backup-cliproxy)
     acquire_lock; import_backup_to_cliproxy ;;
   import-backup-9router)
