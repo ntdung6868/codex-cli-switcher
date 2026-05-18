@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.6 - 2026-05-18
+
+- Add `cxsw codex-status` and include the same check in `cxsw status` so users
+  can verify that the plain `codex` command still points to the official
+  `@openai/codex` CLI, not a `cxsw` wrapper.
+- Keep `cxsw` strictly as a backend/session helper: no aliasing, wrapping, or
+  patching of the official Codex CLI command.
+
 ## 1.0.5 - 2026-05-18
 
 - Add `cxsw last-resume` and show the latest resume command in `cxsw status` so

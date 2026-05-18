@@ -24,6 +24,8 @@ profile.
 - Probe backend health from the CLI or interactive menu.
 - Relaunch, quit, or hot-reload Codex.app after changing backends.
 - Diagnose plugin/marketplace mismatches that can trigger Codex.app crash overlays.
+- Verify that the plain `codex` command still points to the official
+  `@openai/codex` CLI and has not been replaced by `cxsw`.
 - Disable app-backed plugins while proxy mode is active so `codex_apps` does not
   fail on a stale native `~/.codex/auth.json` OAuth token.
 - Restore Codex OAuth account JSON files into CLIProxyAPI. 9Router Codex OAuth
@@ -112,6 +114,7 @@ keys cannot start with a digit.
 cxsw                         # interactive menu
 cxsw init                    # create local state and native snapshots
 cxsw status                  # active mode, health checks, account counts
+cxsw codex-status            # verify plain "codex" is still official Codex CLI
 cxsw current                 # print only the active mode
 cxsw last-resume             # print latest "codex resume <id>" fallback
 
@@ -185,6 +188,18 @@ that value takes precedence over the local default.
 
 Switching back to `native` removes only those managed regions. Your other Codex
 settings are left unchanged.
+
+## Codex CLI Command Safety
+
+`cxsw` does not replace, alias, wrap, or patch the official `codex` command.
+Plain `codex` should remain the npm-installed `@openai/codex` CLI, while `cxsw`
+stays a separate backend switcher command.
+
+Check that setup with:
+
+```bash
+cxsw codex-status
+```
 
 ## Proxy Plugin Guard
 

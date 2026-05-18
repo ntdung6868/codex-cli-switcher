@@ -306,6 +306,33 @@ codex_cli_session_running() {
     | grep -q . 2>/dev/null
 }
 
+codex_cli_status_line() {
+  local codex_path resolved target version detail
+  codex_path="$(whence -p codex 2>/dev/null || true)"
+  if [[ -z "$codex_path" ]]; then
+    print -- "Codex CLI: missing on PATH"
+    return 1
+  fi
+
+  resolved="${codex_path:A}"
+  target="$(readlink "$codex_path" 2>/dev/null || true)"
+  version="$(codex --version 2>/dev/null | head -1 || true)"
+  [[ -n "$version" ]] || version="version unavailable"
+  detail="$codex_path"
+  [[ -n "$target" ]] && detail+=" -> $target"
+
+  if [[ "$resolved" == "${SCRIPT_DIR:A}/cxsw" || "$target" == *"codex-cli-switcher/cxsw"* ]]; then
+    print -- "Codex CLI: WARNING codex points to cxsw ($detail). Restore @openai/codex to keep official CLI behavior."
+    return 1
+  fi
+
+  if [[ "$resolved" == *"/@openai/codex/"* || "$target" == *"@openai/codex"* ]]; then
+    print -- "Codex CLI: official $version ($detail)"
+  else
+    print -- "Codex CLI: custom $version ($detail)"
+  fi
+}
+
 live_session_guard_enabled() {
   case "${CXSW_LIVE_SESSION_GUARD:-1}" in
     0|false|FALSE|no|NO) return 1 ;;
@@ -919,6 +946,9 @@ menu_status() {
   ui_print "  • CLIProxyAPI auth files:   $cli_n"
   ui_print "  • 9Router codex providers: $r9_n (active)"
   ui_print ""
+  ui_print "%F{cyan}Codex CLI%f"
+  { codex_cli_status_line || true; } | while IFS= read -r line; do ui_print "  • $line"; done
+  ui_print ""
   ui_print "%F{cyan}Codex sessions%f"
   session_status_line | while IFS= read -r line; do ui_print "  • $line"; done
   local resume_cmd
@@ -1033,6 +1063,8 @@ Usage:
   cxsw doctor --disable "<name@mp>" --fix
                                         Force-disable a specific plugin (e.g. the ones
                                         Codex.app falsely reports as missing)
+  cxsw codex-status          Verify the 'codex' command still points to the
+                             official @openai/codex CLI, not cxsw
   cxsw status                Print mode + backend health
   cxsw current               Print active mode name only
   cxsw last-resume           Print the latest 'codex resume <id>' command
@@ -1140,12 +1172,15 @@ case "$cmd" in
     quit_codex_app ;;
   doctor)
     "$PYTHON_BIN" "$LIB_DIR/codex-doctor.py" --config "$CODEX_CONFIG" "$@" ;;
+  codex-status)
+    codex_cli_status_line ;;
   status)
     mode="$(active_mode)"
     print -- "Mode: $mode"
     for m in cliproxy 9router native; do
       print -- "  $m: $(backend_status_line "$m")"
     done
+    codex_cli_status_line || true
     session_status_line
     if resume_cmd="$(latest_resume_command --cwd "$PWD" 2>/dev/null)"; then
       print -- "Latest resume: $resume_cmd"
