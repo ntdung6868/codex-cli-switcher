@@ -187,6 +187,11 @@ session_status_line() {
   "$PYTHON_BIN" "$LIB_DIR/codex-sessions.py" status --codex-home "$CODEX_HOME" 2>/dev/null || true
 }
 
+latest_resume_command() {
+  [[ -f "$LIB_DIR/codex-sessions.py" ]] || return 1
+  "$PYTHON_BIN" "$LIB_DIR/codex-sessions.py" latest --codex-home "$CODEX_HOME" "$@"
+}
+
 # ============================================================================
 # Proxy plugin guard
 # ============================================================================
@@ -916,6 +921,9 @@ menu_status() {
   ui_print ""
   ui_print "%F{cyan}Codex sessions%f"
   session_status_line | while IFS= read -r line; do ui_print "  • $line"; done
+  local resume_cmd
+  resume_cmd="$(latest_resume_command --cwd "$PWD" 2>/dev/null || true)"
+  [[ -n "$resume_cmd" ]] && ui_print "  • Latest resume: $resume_cmd"
   ui_print ""
   ui_print "%F{cyan}Proxy plugin guard%f"
   proxy_plugin_guard_status_line | while IFS= read -r line; do ui_print "  • $line"; done
@@ -1027,6 +1035,7 @@ Usage:
                                         Codex.app falsely reports as missing)
   cxsw status                Print mode + backend health
   cxsw current               Print active mode name only
+  cxsw last-resume           Print the latest 'codex resume <id>' command
   cxsw shim [status|start|stop|restart]
                              Manage the 9router gunzip shim (auto-managed by
                              'cxsw use'; fixes "Invalid JSON body" on resume)
@@ -1138,9 +1147,25 @@ case "$cmd" in
       print -- "  $m: $(backend_status_line "$m")"
     done
     session_status_line
+    if resume_cmd="$(latest_resume_command --cwd "$PWD" 2>/dev/null)"; then
+      print -- "Latest resume: $resume_cmd"
+    fi
     proxy_plugin_guard_status_line ;;
   current)
     active_mode ;;
+  last-resume|resume-last|last-session)
+    shift
+    has_cwd_arg="0"
+    for a in "$@"; do
+      case "$a" in
+        --cwd|--cwd=*) has_cwd_arg="1" ;;
+      esac
+    done
+    if [[ "$has_cwd_arg" == "1" ]]; then
+      latest_resume_command "$@"
+    else
+      latest_resume_command --cwd "$PWD" "$@"
+    fi ;;
   shim)
     shift; cmd_shim "${1:-status}" ;;
   plugin-guard|plugins-guard|proxy-plugin-guard)

@@ -572,6 +572,28 @@ def provider_counts(codex_home: pathlib.Path) -> dict[str, int]:
         con.close()
 
 
+def latest_resumable_rollout(
+    rollouts: dict[str, Rollout],
+    cwd: str | None = None,
+    since_ms: int | None = None,
+) -> Rollout | None:
+    wanted_cwd = os.path.abspath(os.path.expanduser(cwd)) if cwd else None
+    candidates: list[Rollout] = []
+    for rollout in rollouts.values():
+        if not rollout.has_user_event:
+            continue
+        if since_ms is not None and rollout.updated_at_ms < since_ms and rollout.created_at_ms < since_ms:
+            continue
+        if wanted_cwd:
+            rollout_cwd = os.path.abspath(os.path.expanduser(rollout.cwd)) if rollout.cwd else ""
+            if rollout_cwd != wanted_cwd:
+                continue
+        candidates.append(rollout)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item.updated_at_ms, item.created_at_ms, item.id))
+
+
 def count_index(codex_home: pathlib.Path) -> int:
     path = codex_home / "session_index.jsonl"
     if not path.exists():
@@ -642,6 +664,24 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_latest(args: argparse.Namespace) -> int:
+    codex_home = pathlib.Path(args.codex_home).expanduser()
+    rollouts = collect_rollouts(codex_home)
+    latest = latest_resumable_rollout(rollouts, cwd=args.cwd, since_ms=args.since_ms)
+    if latest is None and args.cwd and not args.strict_cwd:
+        latest = latest_resumable_rollout(rollouts, since_ms=args.since_ms)
+    if latest is None and args.since_ms is not None and not args.strict_since:
+        latest = latest_resumable_rollout(rollouts, cwd=args.cwd)
+    if latest is None:
+        print("No resumable Codex session found.", file=sys.stderr)
+        return 1
+    if args.id_only:
+        print(latest.id)
+    else:
+        print(f"codex resume {latest.id}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -660,6 +700,15 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Print local session metadata counts")
     status.add_argument("--codex-home", default=os.path.expanduser("~/.codex"))
     status.set_defaults(func=cmd_status)
+
+    latest = sub.add_parser("latest", help="Print the latest resumable Codex command")
+    latest.add_argument("--codex-home", default=os.path.expanduser("~/.codex"))
+    latest.add_argument("--cwd", help="Prefer sessions from this working directory")
+    latest.add_argument("--since-ms", type=int, help="Prefer sessions created/updated after this epoch millis")
+    latest.add_argument("--strict-cwd", action="store_true", help="Do not fall back to another cwd")
+    latest.add_argument("--strict-since", action="store_true", help="Do not fall back before --since-ms")
+    latest.add_argument("--id-only", action="store_true")
+    latest.set_defaults(func=cmd_latest)
     return parser
 
 

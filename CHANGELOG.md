@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.5 - 2026-05-18
+
+- Add `cxsw last-resume` and show the latest resume command in `cxsw status` so
+  users can recover the `codex resume <id>` command even if the terminal does
+  not display Codex's native exit hint.
+
 ## 1.0.4 - 2026-05-16
 
 - Add a proxy plugin guard that disables non-bundled app-backed plugins in

@@ -113,6 +113,7 @@ cxsw                         # interactive menu
 cxsw init                    # create local state and native snapshots
 cxsw status                  # active mode, health checks, account counts
 cxsw current                 # print only the active mode
+cxsw last-resume             # print latest "codex resume <id>" fallback
 
 cxsw use cliproxy            # switch to CLIProxyAPI
 cxsw use 9router             # switch to 9Router
@@ -222,6 +223,14 @@ Run it manually when needed:
 ```bash
 cxsw repair-sessions --dry-run
 cxsw repair-sessions
+```
+
+If Codex exits but your terminal does not show the native `codex resume <id>`
+hint, the conversation is still recoverable as long as it was written to
+`~/.codex/sessions/`:
+
+```bash
+cxsw last-resume
 ```
 
 Set `CXSW_SESSION_SYNC=0` if you only want backend switching and no automatic
