@@ -236,7 +236,8 @@ probe() {
   local url="$1" key="$2"
   local code
   code=$(curl -sS -o /dev/null -m 4 -w "%{http_code}" \
-    -H "Authorization: Bearer $key" "$url/models" 2>/dev/null || echo 000)
+    -H "Authorization: Bearer $key" "$url/models" 2>/dev/null || true)
+  [[ -n "$code" ]] || code="000"
   print -- "$code"
 }
 

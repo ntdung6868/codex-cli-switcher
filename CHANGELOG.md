@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.7 - 2026-05-18
+
+- Normalize failed backend health probes to `HTTP 000` instead of the duplicated
+  `HTTP 000000` display when curl reports no HTTP response.
+
 ## 1.0.6 - 2026-05-18
 
 - Add `cxsw codex-status` and include the same check in `cxsw status` so users
