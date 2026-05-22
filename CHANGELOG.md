@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.8 - 2026-05-22
+
+- Migrate legacy `cliproxyapi` Codex provider config when switching modes so
+  `cxsw use cliproxy` does not leave duplicate `model_provider` entries or a
+  stale `[model_providers.cliproxyapi]` block behind.
+- Also strip legacy `cliproxyapi` when switching back to `native`.
+
 ## 1.0.7 - 2026-05-18
 
 - Normalize failed backend health probes to `HTTP 000` instead of the duplicated

@@ -16,6 +16,7 @@ MARKER_TOP_BEGIN  = "# === cxsw managed: provider key ==="
 MARKER_TOP_END    = "# === cxsw managed: provider key end ==="
 MARKER_TBL_BEGIN  = "# === cxsw managed: provider block ==="
 MARKER_TBL_END    = "# === cxsw managed: provider block end ==="
+MANAGED_PROVIDER_IDS = ("cliproxy", "cliproxyapi", "r9router")
 
 # 9router has TOML-safe bare key
 PROVIDERS = {
@@ -40,6 +41,7 @@ PROVIDERS = {
 def strip_managed(text: str) -> str:
     """Remove both marker-fenced blocks if present, plus any orphan lines we own."""
     out = text
+    managed_provider_re = "|".join(re.escape(provider_id) for provider_id in MANAGED_PROVIDER_IDS)
     for begin, end in [(MARKER_TOP_BEGIN, MARKER_TOP_END), (MARKER_TBL_BEGIN, MARKER_TBL_END)]:
         out = re.sub(
             rf"\n?{re.escape(begin)}.*?{re.escape(end)}\n?",
@@ -48,11 +50,11 @@ def strip_managed(text: str) -> str:
             flags=re.DOTALL,
         )
     # Remove our managed top-level model_provider line if it leaked out
-    out = re.sub(r"(?m)^\s*model_provider\s*=\s*\"(cliproxy|r9router)\"\s*\n", "", out)
+    out = re.sub(rf"(?m)^\s*model_provider\s*=\s*\"(?:{managed_provider_re})\"\s*\n", "", out)
     # Remove our managed provider blocks, including nested auth tables, if
     # they exist outside the markers.
     out = re.sub(
-        r"(?ms)^\[model_providers\.(?:cliproxy|r9router)(?:\.[^\]]+)?\].*?(?=^\[(?!model_providers\.(?:cliproxy|r9router)(?:\.|\]))|\Z)",
+        rf"(?ms)^\[model_providers\.(?:{managed_provider_re})(?:\.[^\]]+)?\].*?(?=^\[(?!model_providers\.(?:{managed_provider_re})(?:\.|\]))|\Z)",
         "",
         out,
     )
