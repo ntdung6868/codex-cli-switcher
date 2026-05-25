@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.9 - 2026-05-25
+
+- Auto-create an empty `~/.codex/config.toml` (mode 600) when switching backends
+  if the file does not exist yet, instead of erroring with
+  `no Codex config at ... — run codex once first.`. Codex CLI only writes
+  `config.toml` after a successful login, so a fresh install used purely with
+  CLIProxyAPI/9Router previously could not switch without manually creating
+  the file.
+
 ## 1.0.8 - 2026-05-22
 
 - Migrate legacy `cliproxyapi` Codex provider config when switching modes so

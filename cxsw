@@ -142,6 +142,19 @@ provider_id_for_mode() {
   esac
 }
 
+# Make sure ~/.codex/config.toml exists. Codex CLI only creates it after a
+# successful login, but cxsw works with cliproxy/9router (no native login),
+# so we transparently bootstrap an empty file the first time we need one.
+ensure_codex_config() {
+  ensure_dirs
+  [[ -d "$CODEX_HOME" ]] || { mkdir -p "$CODEX_HOME"; chmod 700 "$CODEX_HOME"; }
+  if [[ ! -f "$CODEX_CONFIG" ]]; then
+    : > "$CODEX_CONFIG"
+    chmod 600 "$CODEX_CONFIG"
+    print -- "Created empty $CODEX_CONFIG (codex had not generated one yet)."
+  fi
+}
+
 # Snapshot the current native config the first time we run, so we can rollback.
 maybe_snapshot_native() {
   ensure_dirs
@@ -633,7 +646,7 @@ cmd_shim() {
 # ============================================================================
 
 switch_to_cliproxy() {
-  [[ -f "$CODEX_CONFIG" ]] || die "no Codex config at $CODEX_CONFIG — run codex once first."
+  ensure_codex_config
   maybe_snapshot_native
   stop_9router_shim
   apply_config_for_mode cliproxy
@@ -645,7 +658,7 @@ switch_to_cliproxy() {
 }
 
 switch_to_9router() {
-  [[ -f "$CODEX_CONFIG" ]] || die "no Codex config at $CODEX_CONFIG — run codex once first."
+  ensure_codex_config
   maybe_snapshot_native
   start_9router_shim
   apply_config_for_mode 9router
@@ -657,7 +670,7 @@ switch_to_9router() {
 }
 
 switch_to_native() {
-  [[ -f "$CODEX_CONFIG" ]] || die "no Codex config at $CODEX_CONFIG — run codex once first."
+  ensure_codex_config
   maybe_snapshot_native
   stop_9router_shim
   apply_config_for_mode native
